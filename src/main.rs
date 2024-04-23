@@ -114,12 +114,11 @@ fn main() -> Result<()> {
             libc::ETH_P_ARP => {
                 eprintln!("Receiving ARP packet");
                 let packet = ArpHeader::from_bytes(frame.payload, frame.payload.len())?;
-                arp_recv(&packet, &mut arp_cache)?;
-            },
+                arp_recv(&packet, &mut arp_cache, &mut iface)?;
+            }
             libc::ETH_P_IP => eprintln!("Receiving IP packet"),
             libc::ETH_P_IPV6 => eprintln!("Receiving IPv6 packet"),
             _ => {
-                // println!("Unknown protocol");
                 continue;
             }
         }

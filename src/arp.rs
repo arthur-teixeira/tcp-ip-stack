@@ -1,11 +1,53 @@
+use tun_tap::Iface;
+
 use crate::BufferView;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
+use std::net::Ipv4Addr;
 
 pub type ArpCache = HashMap<String, ArpIpv4>;
 
+static IP_ADDR: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 7);
+// const MAC_ADDR: &'static str = "00:0b:29:6f:50:24";
+const MAC_OCTETS: [u8; 6] = [0, 0x0b, 0x29, 0x6f, 0x50, 0x24];
+
+struct BufWriter {
+    buf: [u8; 1500],
+    pos: usize,
+}
+
+impl BufWriter {
+    fn new() -> Self {
+        BufWriter {
+            buf: [0; 1500],
+            pos: 0,
+        }
+    }
+
+    fn write_u8(&mut self, val: u8) {
+        self.buf[self.pos] = val;
+        self.pos += 1;
+    }
+
+    fn write_u16(&mut self, val: u16) {
+        self.write_u8((val << 8) as u8);
+        self.write_u8((val & 0xFF) as u8);
+    }
+
+    fn write_u32(&mut self, val: u32) {
+        self.write_u16((val << 16) as u16);
+        self.write_u16((val & 0xFFFF) as u16);
+    }
+
+    fn write_slice(&mut self, val: &[u8]) {
+        for u in val {
+            self.write_u8(*u);
+        }
+    }
+}
+
 const ARP_ETHERNET: u16 = 0x0001;
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ArpHwType {
     ArpEthernet,
 }
@@ -26,7 +68,7 @@ impl ArpHwType {
 }
 
 const ARP_IPV4: u16 = 0x0800;
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ArpProtocolType {
     ArpIpv4,
 }
@@ -38,9 +80,15 @@ impl ArpProtocolType {
             _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol")),
         }
     }
+
+    fn to_u16(&self) -> u16 {
+        match self {
+            Self::ArpIpv4 => ARP_IPV4,
+        }
+    }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ArpOp {
     ArpRequest,
     ArpResponse,
@@ -58,9 +106,18 @@ impl ArpOp {
             _ => Err(Error::new(ErrorKind::InvalidData, "Invalid ARP opcode")),
         }
     }
+
+    fn to_u16(&self) -> u16 {
+        match self {
+            Self::ArpRequest => 1,
+            Self::ArpResponse => 2,
+            Self::RarpResponse => 3,
+            Self::RarpRequest => 4,
+        }
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ArpHeader {
     pub hwtype: ArpHwType,
     pub protype: ArpProtocolType,
@@ -86,13 +143,26 @@ impl ArpHeader {
             data: buf.read_slice(buf.size - buf.pos).into(),
         })
     }
+
+    fn to_buffer(&self) -> [u8; 1500] {
+        let mut buf_writer = BufWriter::new();
+        buf_writer.write_u16(self.hwtype.to_u16());
+        buf_writer.write_u16(self.protype.to_u16());
+        buf_writer.write_u8(self.hwsize);
+        buf_writer.write_u8(self.prosize);
+        buf_writer.write_u16(self.opcode.to_u16());
+        buf_writer.write_slice(&self.data);
+
+        buf_writer.buf
+    }
 }
 
+#[derive(Clone)]
 pub struct ArpIpv4 {
     smac: [u8; 6],
-    sip: u32,
+    sip: Ipv4Addr,
     dmac: [u8; 6],
-    dip: u32,
+    dip: Ipv4Addr,
 }
 
 impl ArpIpv4 {
@@ -108,14 +178,40 @@ impl ArpIpv4 {
 
         Ok(Self {
             smac,
-            sip,
+            sip: Ipv4Addr::from(sip),
             dmac,
-            dip,
+            dip: Ipv4Addr::from(dip),
         })
+    }
+
+    fn to_buffer(&self) -> [u8; 1500] {
+        let mut buf = BufWriter::new();
+        buf.write_slice(&self.smac);
+        buf.write_u32(self.sip.into());
+        buf.write_slice(&self.dmac);
+        buf.write_u32(self.dip.into());
+
+        buf.buf
     }
 }
 
-pub fn arp_recv(packet: &ArpHeader, cache: &mut ArpCache) -> Result<()> {
+fn arp_reply(mut header: ArpHeader, packet: &ArpIpv4, iface: &mut Iface) -> Result<()> {
+    let response_packet = ArpIpv4 {
+        dip: packet.sip,
+        dmac: packet.smac,
+        sip: IP_ADDR,
+        smac: MAC_OCTETS,
+    };
+
+    header.data = Box::new(response_packet.to_buffer());
+    let nsent = iface.send(&header.to_buffer())?;
+
+    eprintln!("Sent {nsent} bytes");
+
+    Ok(())
+}
+
+pub fn arp_recv(packet: &ArpHeader, cache: &mut ArpCache, iface: &mut Iface) -> Result<()> {
     let ipv4_packet = ArpIpv4::from_header(packet)?;
 
     let cache_key = format!("{}-{}", packet.hwtype.to_u16(), ipv4_packet.sip);
@@ -128,17 +224,20 @@ pub fn arp_recv(packet: &ArpHeader, cache: &mut ArpCache) -> Result<()> {
         None => false,
     };
 
-    // TODO: check if we are the target address
+    if ipv4_packet.dip != IP_ADDR {
+        eprintln!("ARP packet was not for us.");
+        return Ok(());
+    }
 
     if !merge {
-        cache.insert(cache_key, ipv4_packet);
+        cache.insert(cache_key, ipv4_packet.clone());
     }
 
     match packet.opcode {
         ArpOp::RarpRequest => {
-            // TODO: reply
+            arp_reply(packet.clone(), &ipv4_packet, iface)?;
         }
-        _ => {},
+        _ => {}
     }
 
     Ok(())
