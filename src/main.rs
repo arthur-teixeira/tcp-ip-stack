@@ -1,12 +1,10 @@
 use libc::c_int;
+use tun_tap::{Iface, Mode};
 use std::fmt::Display;
-use std::fs::File;
-use std::io::{Read, Result};
-
-mod tuntap;
+use std::io::Result;
 
 struct SocketBuffer {
-    buf: [u8; 4096],
+    buf: [u8; 1500],
     size: usize,
     pos: usize,
 }
@@ -29,9 +27,9 @@ impl SocketBuffer {
         val
     }
 
-    fn from_file(f: &mut File) -> Result<Self> {
-        let mut buffer = [0; 4096];
-        let nb = f.read(&mut buffer)?;
+    fn from_iface(f: &mut Iface) -> Result<Self> {
+        let mut buffer = [0; 1500];
+        let nb = f.recv(&mut buffer)?;
         Ok(Self {
             buf: buffer,
             size: nb,
@@ -63,7 +61,10 @@ impl Display for Frame<'_> {
         let t = self.ethertype;
         let ethertype = format!("{:#4x}", t);
 
-        write!(f, "dmac: ({dmac}), smac: ({smac}), ethertype: ({ethertype})")
+        write!(
+            f,
+            "dmac: ({dmac}), smac: ({smac}), ethertype: ({ethertype})"
+        )
     }
 }
 
@@ -78,25 +79,26 @@ impl<'a> Frame<'a> {
         Self {
             dmac,
             smac,
-            ethertype: u16::from_be(buffer.read_u16()),
+            ethertype: buffer.read_u16(),
             payload: buffer.read_slice(buffer.size - buffer.pos),
         }
     }
 }
 
 fn main() -> Result<()> {
-    let mut file = tuntap::tun_init("tap1")?;
+    let mut iface = Iface::without_packet_info("tap1", Mode::Tap)?;
 
     loop {
-        let mut sock_buff = SocketBuffer::from_file(&mut file)?;
+        let mut sock_buff = SocketBuffer::from_iface(&mut iface)?;
         let frame = Frame::from_buffer(&mut sock_buff);
 
         match frame.ethertype as c_int {
-            libc::ETH_P_ARP | libc::ETH_P_IP | libc::ETH_P_IPV6 => {
-                println!("Protocol is known");
-            }
-            _ => {
+            libc::ETH_P_ARP => println!("Receiving ARP packet"),
+            libc::ETH_P_IP => println!("Receiving IP packet"),
+            libc::ETH_P_IPV6 => println!("Receiving IPv6 packet"),
+            _ => { 
                 println!("Unknown protocol");
+                continue;
             }
         }
         eprintln!("Frame: {frame}");
