@@ -1,15 +1,18 @@
 use libc::c_int;
-use tun_tap::{Iface, Mode};
 use std::fmt::Display;
 use std::io::Result;
+use tun_tap::{Iface, Mode};
 
-struct SocketBuffer {
-    buf: [u8; 1500],
+use crate::arp::ArpHeader;
+mod arp;
+
+struct BufferView {
+    buf: Box<[u8]>,
     size: usize,
     pos: usize,
 }
 
-impl SocketBuffer {
+impl BufferView {
     fn read_u8(&mut self) -> u8 {
         let val = self.buf[self.pos];
         self.pos += 1;
@@ -31,14 +34,21 @@ impl SocketBuffer {
         let mut buffer = [0; 1500];
         let nb = f.recv(&mut buffer)?;
         Ok(Self {
-            buf: buffer,
+            buf: Box::new(buffer),
             size: nb,
+            pos: 0,
+        })
+    }
+
+    fn from_slice(s: &[u8], size: usize) -> Result<Self> {
+        Ok(Self {
+            buf: s.into(),
+            size,
             pos: 0,
         })
     }
 }
 
-#[repr(C, packed)]
 #[derive(Debug, Clone, PartialEq)]
 struct Frame<'a> {
     dmac: [u8; 6],
@@ -64,12 +74,14 @@ impl Display for Frame<'_> {
         write!(
             f,
             "dmac: ({dmac}), smac: ({smac}), ethertype: ({ethertype})"
-        )
+        )?;
+
+        write!(f, "{:x?}", self.payload)
     }
 }
 
 impl<'a> Frame<'a> {
-    fn from_buffer(buffer: &'a mut SocketBuffer) -> Self {
+    fn from_buffer(buffer: &'a mut BufferView) -> Self {
         let mut dmac = [0; 6];
         dmac.copy_from_slice(buffer.read_slice(6));
 
@@ -89,18 +101,22 @@ fn main() -> Result<()> {
     let mut iface = Iface::without_packet_info("tap1", Mode::Tap)?;
 
     loop {
-        let mut sock_buff = SocketBuffer::from_iface(&mut iface)?;
+        let mut sock_buff = BufferView::from_iface(&mut iface)?;
         let frame = Frame::from_buffer(&mut sock_buff);
 
         match frame.ethertype as c_int {
-            libc::ETH_P_ARP => println!("Receiving ARP packet"),
-            libc::ETH_P_IP => println!("Receiving IP packet"),
-            libc::ETH_P_IPV6 => println!("Receiving IPv6 packet"),
-            _ => { 
-                println!("Unknown protocol");
+            libc::ETH_P_ARP => {
+                eprintln!("Receiving ARP packet");
+                let mut packet = ArpHeader::from_bytes(frame.payload, frame.payload.len())?;
+                packet.recv()?;
+            },
+            libc::ETH_P_IP => eprintln!("Receiving IP packet"),
+            libc::ETH_P_IPV6 => eprintln!("Receiving IPv6 packet"),
+            _ => {
+                // println!("Unknown protocol");
                 continue;
             }
         }
-        eprintln!("Frame: {frame}");
+        eprintln!("Payload: {:x?}", &frame.payload[..]);
     }
 }
