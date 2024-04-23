@@ -1,9 +1,10 @@
+use arp::ArpCache;
 use libc::c_int;
 use std::fmt::Display;
 use std::io::Result;
 use tun_tap::{Iface, Mode};
 
-use crate::arp::ArpHeader;
+use crate::arp::{arp_recv, ArpHeader};
 mod arp;
 
 struct BufferView {
@@ -22,6 +23,10 @@ impl BufferView {
 
     fn read_u16(&mut self) -> u16 {
         (self.read_u8() as u16) << 8 | (self.read_u8() as u16)
+    }
+
+    fn read_u32(&mut self) -> u32 {
+        (self.read_u16() as u32) << 16 | (self.read_u16() as u32)
     }
 
     fn read_slice(&mut self, size: usize) -> &[u8] {
@@ -99,6 +104,7 @@ impl<'a> Frame<'a> {
 
 fn main() -> Result<()> {
     let mut iface = Iface::without_packet_info("tap1", Mode::Tap)?;
+    let mut arp_cache = ArpCache::new();
 
     loop {
         let mut sock_buff = BufferView::from_iface(&mut iface)?;
@@ -107,8 +113,8 @@ fn main() -> Result<()> {
         match frame.ethertype as c_int {
             libc::ETH_P_ARP => {
                 eprintln!("Receiving ARP packet");
-                let mut packet = ArpHeader::from_bytes(frame.payload, frame.payload.len())?;
-                packet.recv()?;
+                let packet = ArpHeader::from_bytes(frame.payload, frame.payload.len())?;
+                arp_recv(&packet, &mut arp_cache)?;
             },
             libc::ETH_P_IP => eprintln!("Receiving IP packet"),
             libc::ETH_P_IPV6 => eprintln!("Receiving IPv6 packet"),
