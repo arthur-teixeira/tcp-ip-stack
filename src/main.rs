@@ -1,7 +1,7 @@
+use libc::c_int;
+use std::fmt::Display;
 use std::fs::File;
 use std::io::{Read, Result};
-use libc::c_int;
-
 
 mod tuntap;
 
@@ -49,6 +49,24 @@ struct Frame<'a> {
     payload: &'a [u8],
 }
 
+impl Display for Frame<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let dmac = format!(
+            "{:#2x}:{:#2x}:{:#2x}:{:#2x}:{:#2x}:{:#2x}",
+            self.dmac[0], self.dmac[1], self.dmac[2], self.dmac[3], self.dmac[4], self.dmac[5]
+        );
+        let smac = format!(
+            "{:#2x}:{:#2x}:{:#2x}:{:#2x}:{:#2x}:{:#2x}",
+            self.smac[0], self.smac[1], self.smac[2], self.smac[3], self.smac[4], self.smac[5]
+        );
+
+        let t = self.ethertype;
+        let ethertype = format!("{:#4x}", t);
+
+        write!(f, "dmac: ({dmac}), smac: ({smac}), ethertype: ({ethertype})")
+    }
+}
+
 impl<'a> Frame<'a> {
     fn from_buffer(buffer: &'a mut SocketBuffer) -> Self {
         let mut dmac = [0; 6];
@@ -67,7 +85,7 @@ impl<'a> Frame<'a> {
 }
 
 fn main() -> Result<()> {
-    let mut file = tuntap::tun_init("tap0")?;
+    let mut file = tuntap::tun_init("tap1")?;
 
     loop {
         let mut sock_buff = SocketBuffer::from_file(&mut file)?;
@@ -81,7 +99,6 @@ fn main() -> Result<()> {
                 println!("Unknown protocol");
             }
         }
-        eprintln!("Frame: {frame:?}");
+        eprintln!("Frame: {frame}");
     }
 }
-
