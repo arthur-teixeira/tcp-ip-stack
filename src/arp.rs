@@ -1,6 +1,6 @@
 use tun_tap::Iface;
 
-use crate::BufferView;
+use crate::{BufWriter, BufferView};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::net::Ipv4Addr;
@@ -10,41 +10,6 @@ pub type ArpCache = HashMap<String, ArpIpv4>;
 static IP_ADDR: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 7);
 // const MAC_ADDR: &'static str = "00:0b:29:6f:50:24";
 const MAC_OCTETS: [u8; 6] = [0, 0x0b, 0x29, 0x6f, 0x50, 0x24];
-
-struct BufWriter {
-    buf: [u8; 1500],
-    pos: usize,
-}
-
-impl BufWriter {
-    fn new() -> Self {
-        BufWriter {
-            buf: [0; 1500],
-            pos: 0,
-        }
-    }
-
-    fn write_u8(&mut self, val: u8) {
-        self.buf[self.pos] = val;
-        self.pos += 1;
-    }
-
-    fn write_u16(&mut self, val: u16) {
-        self.write_u8((val << 8) as u8);
-        self.write_u8((val & 0xFF) as u8);
-    }
-
-    fn write_u32(&mut self, val: u32) {
-        self.write_u16((val << 16) as u16);
-        self.write_u16((val & 0xFFFF) as u16);
-    }
-
-    fn write_slice(&mut self, val: &[u8]) {
-        for u in val {
-            self.write_u8(*u);
-        }
-    }
-}
 
 const ARP_ETHERNET: u16 = 0x0001;
 #[derive(Debug, PartialEq, Clone)]
@@ -124,7 +89,7 @@ pub struct ArpHeader {
     pub hwsize: u8,
     pub prosize: u8,
     pub opcode: ArpOp,
-    pub data: Box<[u8]>,
+    pub data: Vec<u8>,
 }
 
 impl ArpHeader {
@@ -144,20 +109,20 @@ impl ArpHeader {
         })
     }
 
-    fn to_buffer(&self) -> [u8; 1500] {
+    fn to_buffer(&self) -> Vec<u8> {
         let mut buf_writer = BufWriter::new();
-        buf_writer.write_u16(self.hwtype.to_u16());
-        buf_writer.write_u16(self.protype.to_u16());
+        buf_writer.write_u16(self.hwtype.to_u16().to_be());
+        buf_writer.write_u16(self.protype.to_u16().to_be());
         buf_writer.write_u8(self.hwsize);
         buf_writer.write_u8(self.prosize);
-        buf_writer.write_u16(self.opcode.to_u16());
+        buf_writer.write_u16(self.opcode.to_u16().to_be());
         buf_writer.write_slice(&self.data);
 
         buf_writer.buf
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ArpIpv4 {
     smac: [u8; 6],
     sip: Ipv4Addr,
@@ -184,12 +149,12 @@ impl ArpIpv4 {
         })
     }
 
-    fn to_buffer(&self) -> [u8; 1500] {
+    fn to_buffer(&self) -> Vec<u8> {
         let mut buf = BufWriter::new();
         buf.write_slice(&self.smac);
-        buf.write_u32(self.sip.into());
+        buf.write_u32(u32::from(self.sip).to_be());
         buf.write_slice(&self.dmac);
-        buf.write_u32(self.dip.into());
+        buf.write_u32(u32::from(self.dip).to_be());
 
         buf.buf
     }
@@ -203,10 +168,24 @@ fn arp_reply(mut header: ArpHeader, packet: &ArpIpv4, iface: &mut Iface) -> Resu
         smac: MAC_OCTETS,
     };
 
-    header.data = Box::new(response_packet.to_buffer());
-    let nsent = iface.send(&header.to_buffer())?;
+    header.opcode = ArpOp::ArpResponse;
+    header.data = response_packet.to_buffer();
 
-    eprintln!("Sent {nsent} bytes");
+    eprintln!("Header: {header:?}");
+    eprintln!("response: {response_packet:?}");
+
+    let ether_frame = crate::Frame {
+        dmac: packet.dmac,
+        smac: packet.smac,
+        ethertype: libc::ETH_P_ARP as u16,
+        payload: &header.to_buffer(),
+    };
+
+    let ether_buf = ether_frame.to_buffer();
+    let snt = iface.send(&ether_buf)?;
+
+    eprintln!("ARP RESPONSE: {:?}", ether_buf);
+    eprintln!("Sent {snt} bytes");
 
     Ok(())
 }
@@ -234,7 +213,7 @@ pub fn arp_recv(packet: &ArpHeader, cache: &mut ArpCache, iface: &mut Iface) -> 
     }
 
     match packet.opcode {
-        ArpOp::RarpRequest => {
+        ArpOp::ArpRequest => {
             arp_reply(packet.clone(), &ipv4_packet, iface)?;
         }
         _ => {}
