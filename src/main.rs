@@ -10,7 +10,8 @@ mod arp;
 mod buffer_view;
 mod buf_writer;
 mod frame;
-
+mod ipv4;
+mod icmpv4;
 
 fn main() -> Result<()> {
     let mut iface = Iface::without_packet_info("tap1", Mode::Tap)?;
