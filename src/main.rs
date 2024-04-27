@@ -1,12 +1,10 @@
-use arp::ArpCache;
+use arp::{arp_recv, ArpCache};
 use libc::c_int;
 use std::io::Result;
 use tun_tap::{Iface, Mode};
 use buffer_view::BufferView;
 use buf_writer::BufWriter;
 use frame::Frame;
-
-use crate::arp::{arp_recv, ArpHeader};
 
 mod arp;
 mod buffer_view;
@@ -25,8 +23,8 @@ fn main() -> Result<()> {
         match frame.ethertype as c_int {
             libc::ETH_P_ARP => {
                 eprintln!("Receiving ARP packet");
-                let packet = ArpHeader::from_bytes(frame.payload, frame.payload.len())?;
-                arp_recv(&packet, &mut arp_cache, &mut iface)?;
+                eprintln!("{:?}", frame.payload);
+                arp_recv(frame.payload, &mut arp_cache, &mut iface)?;
             }
             // libc::ETH_P_IP => eprintln!("Receiving IP packet"),
             // libc::ETH_P_IPV6 => eprintln!("Receiving IPv6 packet"),

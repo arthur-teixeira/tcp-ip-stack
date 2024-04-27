@@ -5,22 +5,36 @@ use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::net::Ipv4Addr;
 
+pub trait TunInterface {
+    fn snd(&mut self, buf: &[u8]) -> Result<usize>;
+    fn rcv(&mut self, buf: &mut [u8]) -> Result<usize>;
+}
+
+impl TunInterface for Iface {
+    fn snd(&mut self, buf: &[u8]) -> Result<usize> {
+        self.send(buf)
+    }
+
+    fn rcv(&mut self, buf: &mut [u8]) -> Result<usize> {
+        self.recv(buf)
+    }
+}
+
 pub type ArpCache = HashMap<String, ArpIpv4>;
 
 static IP_ADDR: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 7);
-// const MAC_ADDR: &'static str = "00:0b:29:6f:50:24";
 const MAC_OCTETS: [u8; 6] = [0, 0x0b, 0x29, 0x6f, 0x50, 0x24];
 
 const ARP_ETHERNET: u16 = 0x0001;
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ArpHwType {
-    ArpEthernet = ARP_ETHERNET as isize,
+    Ethernet = ARP_ETHERNET as isize,
 }
 
 impl ArpHwType {
     fn from_u16(n: u16) -> Result<Self> {
         match n {
-            ARP_ETHERNET => Ok(Self::ArpEthernet),
+            ARP_ETHERNET => Ok(Self::Ethernet),
             _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported HW type")),
         }
     }
@@ -31,15 +45,15 @@ impl ArpHwType {
 }
 
 const ARP_IPV4: u16 = 0x0800;
-#[derive(Copy, Debug, PartialEq, Clone)]
+#[derive(Copy, Debug, PartialEq, Eq, Clone)]
 pub enum ArpProtocolType {
-    ArpIpv4 = ARP_IPV4 as isize,
+    Ipv4 = ARP_IPV4 as isize,
 }
 
 impl ArpProtocolType {
     fn from_u16(n: u16) -> Result<Self> {
         match n {
-            ARP_IPV4 => Ok(Self::ArpIpv4),
+            ARP_IPV4 => Ok(Self::Ipv4),
             _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol")),
         }
     }
@@ -49,7 +63,7 @@ impl ArpProtocolType {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Eq)]
 pub enum ArpOp {
     ArpRequest = 1,
     ArpResponse,
@@ -73,7 +87,7 @@ impl ArpOp {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArpHeader {
     pub hwtype: ArpHwType,
     pub protype: ArpProtocolType,
@@ -84,8 +98,8 @@ pub struct ArpHeader {
 }
 
 impl ArpHeader {
-    pub fn from_bytes(bs: &[u8], size: usize) -> Result<Self> {
-        let mut sock_buff = BufferView::from_slice(bs, size)?;
+    pub fn from_bytes(bs: &[u8]) -> Result<Self> {
+        let mut sock_buff = BufferView::from_slice(bs)?;
         ArpHeader::from_buffer(&mut sock_buff)
     }
 
@@ -113,7 +127,7 @@ impl ArpHeader {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[repr(packed)]
 pub struct ArpIpv4 {
     smac: [u8; 6],
@@ -124,7 +138,7 @@ pub struct ArpIpv4 {
 
 impl ArpIpv4 {
     fn from_header(header: &ArpHeader) -> Result<Self> {
-        let mut view = BufferView::from_slice(&header.data, header.data.len())?;
+        let mut view = BufferView::from_slice(&header.data)?;
         let mut smac = [0 as u8; 6];
         smac.copy_from_slice(view.read_slice(6));
 
@@ -146,7 +160,11 @@ unsafe fn struct_to_bytes<T: Sized>(p: &T) -> &[u8] {
     core::slice::from_raw_parts((p as *const T) as *const u8, core::mem::size_of::<T>())
 }
 
-fn arp_reply(mut header: ArpHeader, packet: &ArpIpv4, iface: &mut Iface) -> Result<()> {
+fn arp_reply(
+    mut header: ArpHeader,
+    packet: &ArpIpv4,
+    iface: &mut dyn TunInterface,
+) -> Result<usize> {
     let response_packet = ArpIpv4 {
         dip: packet.sip,
         dmac: packet.smac,
@@ -165,41 +183,156 @@ fn arp_reply(mut header: ArpHeader, packet: &ArpIpv4, iface: &mut Iface) -> Resu
     };
 
     let ether_buf = ether_frame.to_buffer();
-    let snt = iface.send(&ether_buf)?;
-
-    eprintln!("Sent {snt} bytes");
-
-    Ok(())
+    iface.snd(&ether_buf)
 }
 
-pub fn arp_recv(packet: &ArpHeader, cache: &mut ArpCache, iface: &mut Iface) -> Result<()> {
-    let ipv4_packet = ArpIpv4::from_header(packet)?;
+pub fn arp_recv(
+    frame_data: &[u8],
+    cache: &mut ArpCache,
+    iface: &mut dyn TunInterface,
+) -> Result<usize> {
+    let arp_hdr = ArpHeader::from_bytes(frame_data)?;
+    let arp_ipv4 = ArpIpv4::from_header(&arp_hdr)?;
 
-    let cache_key = format!("{}-{}", packet.hwtype.to_u16(), ipv4_packet.sip);
+    let cache_key = format!("{}-{}", arp_hdr.hwtype.to_u16(), arp_ipv4.sip);
 
     let merge = match cache.get_mut(&cache_key) {
         Some(entry) => {
-            entry.smac = ipv4_packet.smac;
+            entry.smac = arp_ipv4.smac;
             true
         }
         None => false,
     };
 
-    if ipv4_packet.dip != IP_ADDR {
+    if arp_ipv4.dip != IP_ADDR {
         eprintln!("ARP packet was not for us.");
-        return Ok(());
+        return Ok(0);
     }
 
     if !merge {
-        cache.insert(cache_key, ipv4_packet.clone());
+        cache.insert(cache_key, arp_ipv4.clone());
     }
 
-    match packet.opcode {
-        ArpOp::ArpRequest => {
-            arp_reply(packet.clone(), &ipv4_packet, iface)?;
+    match arp_hdr.opcode {
+        ArpOp::ArpRequest => arp_reply(arp_hdr, &arp_ipv4, iface),
+        _ => Ok(0),
+    }
+}
+
+#[cfg(test)]
+mod arp_test {
+    use std::{
+        fs::{self, File, OpenOptions},
+        io::Write,
+        os::unix::fs::FileExt,
+    };
+
+    use crate::frame::Frame;
+
+    use super::*;
+    const FRAME: &[u8] = &[
+        0, 1, 8, 0, 6, 4, 0, 1, 42, 125, 214, 5, 152, 164, 192, 168, 100, 1, 0, 0, 0, 0, 0, 0, 10,
+        0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+
+    struct MockTun {
+        pub file: File,
+        pub path: &'static str,
+    }
+
+    impl MockTun {
+        fn new(path: &'static str) -> Self {
+            Self {
+                file: OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(path)
+                    .expect("Expected to open file"),
+                path,
+            }
         }
-        _ => {}
     }
 
-    Ok(())
+    impl Drop for MockTun {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(self.path);
+        }
+    }
+    impl TunInterface for MockTun {
+        fn rcv(&mut self, buf: &mut [u8]) -> Result<usize> {
+            self.file.read_at(buf, 0)
+        }
+
+        fn snd(&mut self, buf: &[u8]) -> Result<usize> {
+            self.file.write(buf)
+        }
+    }
+
+    fn assert_eq_frame(actual: &Frame, expected: Frame) {
+        assert_eq!(actual.ethertype, expected.ethertype);
+        assert_eq!(actual.dmac, expected.dmac);
+        assert_eq!(actual.smac, expected.smac);
+    }
+
+    fn assert_eq_arp_hdr(actual: &ArpHeader, expected: ArpHeader) {
+        assert_eq!(actual.protype, expected.protype);
+        assert_eq!(actual.prosize, expected.prosize);
+        assert_eq!(actual.opcode, expected.opcode);
+        assert_eq!(actual.hwtype, expected.hwtype);
+        assert_eq!(actual.hwsize, expected.hwsize);
+    }
+
+    #[test]
+    fn test_arp_recv() {
+        let mut temp_file = MockTun::new("/tmp/mock_tun");
+        let mut arp_cache = ArpCache::new();
+        let snt = arp_recv(FRAME, &mut arp_cache, &mut temp_file)
+            .expect("Expected to receive data correctly");
+
+        assert_eq!(snt, 42);
+
+        let mut response: [u8; 42] = [0; 42];
+        let rcvd = temp_file
+            .rcv(&mut response)
+            .expect("Expected to read response");
+
+        assert_eq!(snt, rcvd);
+
+        let mut view = BufferView::from_slice(&response).expect("Expected buffer view");
+
+        let eth_frame = Frame::from_buffer(&mut view);
+        assert_eq_frame(
+            &eth_frame,
+            Frame {
+                dmac: [42, 125, 214, 5, 152, 164],
+                smac: MAC_OCTETS,
+                ethertype: libc::ETH_P_ARP as u16,
+                payload: &[],
+            },
+        );
+
+        let arp_hdr = ArpHeader::from_bytes(eth_frame.payload).expect("Expected valid arp header");
+
+        assert_eq_arp_hdr(
+            &arp_hdr,
+            ArpHeader {
+                hwtype: ArpHwType::Ethernet,
+                protype: ArpProtocolType::Ipv4,
+                hwsize: 6,
+                prosize: 4,
+                opcode: ArpOp::ArpResponse,
+                data: vec![],
+            },
+        );
+
+        let arp_ipv4 = ArpIpv4::from_header(&arp_hdr).expect("Expected valid ipv4 arp packet");
+
+        assert_eq!(arp_ipv4, ArpIpv4 {
+                smac: MAC_OCTETS,
+                sip: Ipv4Addr::new(10, 0, 0, 7),
+                dmac: [42, 125, 214, 5, 152, 164],
+                dip: Ipv4Addr::new(192, 168, 100, 1),
+            });
+    }
 }

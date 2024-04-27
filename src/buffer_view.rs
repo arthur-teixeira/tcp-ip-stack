@@ -1,5 +1,6 @@
-use tun_tap::Iface;
 use std::io::Result;
+
+use crate::arp::TunInterface;
 
 pub struct BufferView {
     pub buf: Box<[u8]>,
@@ -29,9 +30,9 @@ impl BufferView {
         val
     }
 
-    pub fn from_iface(f: &mut Iface) -> Result<Self> {
+    pub fn from_iface(f: &mut dyn TunInterface) -> Result<Self> {
         let mut buffer = [0; 1500];
-        let nb = f.recv(&mut buffer)?;
+        let nb = f.rcv(&mut buffer)?;
         Ok(Self {
             buf: Box::new(buffer),
             size: nb,
@@ -39,10 +40,10 @@ impl BufferView {
         })
     }
 
-    pub fn from_slice(s: &[u8], size: usize) -> Result<Self> {
+    pub fn from_slice(s: &[u8]) -> Result<Self> {
         Ok(Self {
             buf: s.into(),
-            size,
+            size: s.len(),
             pos: 0,
         })
     }
