@@ -12,9 +12,9 @@ static IP_ADDR: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 7);
 const MAC_OCTETS: [u8; 6] = [0, 0x0b, 0x29, 0x6f, 0x50, 0x24];
 
 const ARP_ETHERNET: u16 = 0x0001;
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ArpHwType {
-    ArpEthernet,
+    ArpEthernet = ARP_ETHERNET as isize,
 }
 
 impl ArpHwType {
@@ -26,16 +26,14 @@ impl ArpHwType {
     }
 
     fn to_u16(&self) -> u16 {
-        match self {
-            Self::ArpEthernet => ARP_ETHERNET,
-        }
+        *self as u16
     }
 }
 
 const ARP_IPV4: u16 = 0x0800;
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Copy, Debug, PartialEq, Clone)]
 pub enum ArpProtocolType {
-    ArpIpv4,
+    ArpIpv4 = ARP_IPV4 as isize,
 }
 
 impl ArpProtocolType {
@@ -47,15 +45,13 @@ impl ArpProtocolType {
     }
 
     fn to_u16(&self) -> u16 {
-        match self {
-            Self::ArpIpv4 => ARP_IPV4,
-        }
+        *self as u16
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ArpOp {
-    ArpRequest,
+    ArpRequest = 1,
     ArpResponse,
     RarpRequest,
     RarpResponse,
@@ -73,12 +69,7 @@ impl ArpOp {
     }
 
     fn to_u16(&self) -> u16 {
-        match self {
-            Self::ArpRequest => 1,
-            Self::ArpResponse => 2,
-            Self::RarpResponse => 3,
-            Self::RarpRequest => 4,
-        }
+        *self as u16
     }
 }
 
@@ -111,18 +102,19 @@ impl ArpHeader {
 
     fn to_buffer(&self) -> Vec<u8> {
         let mut buf_writer = BufWriter::new();
-        buf_writer.write_u16(self.hwtype.to_u16().to_be());
-        buf_writer.write_u16(self.protype.to_u16().to_be());
+        buf_writer.write_u16(self.hwtype.to_u16());
+        buf_writer.write_u16(self.protype.to_u16());
         buf_writer.write_u8(self.hwsize);
         buf_writer.write_u8(self.prosize);
-        buf_writer.write_u16(self.opcode.to_u16().to_be());
-        buf_writer.write_slice(&self.data);
+        buf_writer.write_u16(self.opcode.to_u16());
+        buf_writer.buf.extend(&self.data);
 
         buf_writer.buf
     }
 }
 
 #[derive(Clone, Debug)]
+#[repr(packed)]
 pub struct ArpIpv4 {
     smac: [u8; 6],
     sip: Ipv4Addr,
@@ -148,16 +140,10 @@ impl ArpIpv4 {
             dip: Ipv4Addr::from(dip),
         })
     }
+}
 
-    fn to_buffer(&self) -> Vec<u8> {
-        let mut buf = BufWriter::new();
-        buf.write_slice(&self.smac);
-        buf.write_u32(u32::from(self.sip).to_be());
-        buf.write_slice(&self.dmac);
-        buf.write_u32(u32::from(self.dip).to_be());
-
-        buf.buf
-    }
+unsafe fn struct_to_bytes<T: Sized>(p: &T) -> &[u8] {
+    core::slice::from_raw_parts((p as *const T) as *const u8, core::mem::size_of::<T>())
 }
 
 fn arp_reply(mut header: ArpHeader, packet: &ArpIpv4, iface: &mut Iface) -> Result<()> {
@@ -169,14 +155,11 @@ fn arp_reply(mut header: ArpHeader, packet: &ArpIpv4, iface: &mut Iface) -> Resu
     };
 
     header.opcode = ArpOp::ArpResponse;
-    header.data = response_packet.to_buffer();
-
-    eprintln!("Header: {header:?}");
-    eprintln!("response: {response_packet:?}");
+    header.data = unsafe { struct_to_bytes(&response_packet) }.to_vec();
 
     let ether_frame = crate::Frame {
-        dmac: packet.dmac,
-        smac: packet.smac,
+        dmac: response_packet.dmac,
+        smac: response_packet.smac,
         ethertype: libc::ETH_P_ARP as u16,
         payload: &header.to_buffer(),
     };
@@ -184,7 +167,6 @@ fn arp_reply(mut header: ArpHeader, packet: &ArpIpv4, iface: &mut Iface) -> Resu
     let ether_buf = ether_frame.to_buffer();
     let snt = iface.send(&ether_buf)?;
 
-    eprintln!("ARP RESPONSE: {:?}", ether_buf);
     eprintln!("Sent {snt} bytes");
 
     Ok(())

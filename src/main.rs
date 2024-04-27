@@ -34,6 +34,5 @@ fn main() -> Result<()> {
                 continue;
             }
         }
-        eprintln!("Payload: {:x?}", &frame.payload[..]);
     }
 }

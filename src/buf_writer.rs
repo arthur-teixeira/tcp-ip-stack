@@ -17,12 +17,12 @@ impl BufWriter {
     }
 
     pub fn write_u16(&mut self, val: u16) {
-        self.write_u8((val << 8) as u8);
+        self.write_u8((val >> 8) as u8);
         self.write_u8((val & 0xFF) as u8);
     }
 
     pub fn write_u32(&mut self, val: u32) {
-        self.write_u16((val << 16) as u16);
+        self.write_u16((val >> 16) as u16);
         self.write_u16((val & 0xFFFF) as u16);
     }
 

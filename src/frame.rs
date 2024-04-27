@@ -3,7 +3,6 @@ use crate::BufferView;
 use std::fmt::Display;
 
 #[derive(Debug, Clone, PartialEq)]
-#[repr(packed)]
 pub struct Frame<'a> {
     pub dmac: [u8; 6],
     pub smac: [u8; 6],
@@ -54,7 +53,7 @@ impl<'a> Frame<'a> {
         let mut buf = BufWriter::new();
         buf.write_slice(&self.dmac);
         buf.write_slice(&self.smac);
-        buf.write_u16(self.ethertype.to_be());
+        buf.write_u16(self.ethertype);
         buf.write_slice(self.payload);
 
         buf.buf
