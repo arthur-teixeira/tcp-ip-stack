@@ -1,10 +1,11 @@
 use bitfield::bitfield;
-use libc::c_void;
 use std::io::{Error, ErrorKind, Result};
 
-extern "C" {
-    fn checksum(addr: *const c_void, count: i32) -> u16;
-}
+use crate::icmpv4;
+
+const IPV4: u8 =  0x04;
+const IP_TCP: u8 =  0x06;
+const ICMPV4: u8 =  0x01;
 
 bitfield! {
     pub struct IpV4Header (MSB0 [u8]);
@@ -24,6 +25,10 @@ bitfield! {
     pub u16, checksum, set_checksum: 95, 80;
     pub u32, src_addr, set_src_addr: 127, 96;
     pub u32, dst_addr, set_dst_addr: 159, 128;
+}
+
+pub fn ipv4_data<'a>(hdr: &'a [u8]) -> &'a [u8] {
+    &hdr[160..]
 }
 
 pub fn calculate_checksum(data: &[u8], skipword: usize) -> u16 {
@@ -79,5 +84,8 @@ pub fn ipv4_recv(frame_data: &[u8]) -> Result<()> {
         return Err(Error::new(ErrorKind::InvalidData, "Invalid checksum"));
     }
 
-    Ok(())
+    match hdr.proto() {
+        ICMPV4 => icmpv4::icmpv4_incoming(frame_data),
+        _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol")),
+    }
 }

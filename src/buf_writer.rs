@@ -27,8 +27,6 @@ impl BufWriter {
     }
 
     pub fn write_slice(&mut self, val: &[u8]) {
-        for u in val {
-            self.write_u8(*u);
-        }
+        self.buf.extend(val);
     }
 }

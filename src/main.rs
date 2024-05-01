@@ -5,8 +5,7 @@ use tun_tap::{Iface, Mode};
 use buffer_view::BufferView;
 use buf_writer::BufWriter;
 use frame::Frame;
-
-use crate::ipv4::ipv4_recv;
+use ipv4::*;
 
 mod arp;
 mod buffer_view;

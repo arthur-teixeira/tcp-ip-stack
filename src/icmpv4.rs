@@ -1,6 +1,7 @@
-use crate::BufferView;
+use crate::{buf_writer::BufWriter, calculate_checksum, ipv4_data, BufferView};
 use std::io::{Error, ErrorKind, Result};
 
+#[derive(Clone, Copy)]
 pub enum IcmpV4MessageType {
     EchoReply = 0,
     DestinationUnreachable = 3,
@@ -42,26 +43,32 @@ impl<'a> IcmpV4Header<'a> {
             data,
         })
     }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut buf_writer = BufWriter::new();
+        buf_writer.write_u8(self.message_type as u8);
+        buf_writer.write_u8(self.code);
+        buf_writer.write_u16(self.csum);
+        buf_writer.write_slice(&self.data.to_bytes());
+
+        buf_writer.buf
+    }
 }
 
 pub enum IcmpV4Message<'a> {
-    Echo {
-        id: u16,
-        seq: u16,
-        data: &'a [u8],
-    },
-    DstUnreachable {
-        len: u8,
-        var: u16,
-        data: &'a [u8],
-    },
+    Echo { id: u16, seq: u16, data: &'a [u8] },
+    DstUnreachable { len: u8, var: u16, data: &'a [u8] },
 }
 
 impl<'a> IcmpV4Message<'a> {
     fn from_buffer(buf: &'a mut BufferView, msg_type: &IcmpV4MessageType) -> Self {
         match msg_type {
-            IcmpV4MessageType::EchoRequest | IcmpV4MessageType::EchoReply => IcmpV4Message::build_echo_msg(buf),
-            IcmpV4MessageType::DestinationUnreachable => IcmpV4Message::build_dst_unreachable_msg(buf),
+            IcmpV4MessageType::EchoRequest | IcmpV4MessageType::EchoReply => {
+                IcmpV4Message::build_echo_msg(buf)
+            }
+            IcmpV4MessageType::DestinationUnreachable => {
+                IcmpV4Message::build_dst_unreachable_msg(buf)
+            }
         }
     }
 
@@ -70,11 +77,7 @@ impl<'a> IcmpV4Message<'a> {
         let seq = buf.read_u16();
         let data = buf.read_slice(buf.size - buf.pos);
 
-        Self::Echo {
-            id,
-            seq,
-            data,
-        }
+        Self::Echo { id, seq, data }
     }
 
     fn build_dst_unreachable_msg(buf: &'a mut BufferView) -> Self {
@@ -83,10 +86,52 @@ impl<'a> IcmpV4Message<'a> {
         let var = buf.read_u16();
         let data = buf.read_slice(buf.size - buf.pos);
 
-        Self::DstUnreachable {
-            len,
-            var, 
-            data,
+        Self::DstUnreachable { len, var, data }
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut buf_writer = BufWriter::new();
+        match self {
+            Self::Echo { id, seq, data } => {
+                buf_writer.write_u16(*id);
+                buf_writer.write_u16(*seq);
+                buf_writer.write_slice(data);
+
+                buf_writer.buf
+            }
+            Self::DstUnreachable { len, var, data } => {
+                buf_writer.write_u8(*len);
+                buf_writer.write_u16(*var);
+                buf_writer.write_slice(data);
+
+                buf_writer.buf
+            }
         }
+    }
+}
+
+fn icmpv4_reply(mut icmp_hdr: IcmpV4Header) -> Result<()> {
+    icmp_hdr.message_type = IcmpV4MessageType::EchoReply;
+    icmp_hdr.csum = 0;
+    icmp_hdr.csum = calculate_checksum(&icmp_hdr.to_bytes(), 1);
+
+    // TODO: wrap ICMP packet in an IP frame, and then wrap that into an Ethernet frame.
+    // Isolate Ethernet / IP / ICMP frame formatting.
+
+    Ok(())
+}
+
+pub fn icmpv4_incoming(ip_frame: &[u8]) -> Result<()> {
+    let ip_data = ipv4_data(ip_frame);
+    let mut buf_view = BufferView::from_slice(ip_data)?;
+    let icmp_hdr = IcmpV4Header::from_buffer(&mut buf_view)?;
+
+    match icmp_hdr.message_type {
+        IcmpV4MessageType::EchoRequest => icmpv4_reply(icmp_hdr),
+        IcmpV4MessageType::DestinationUnreachable => Err(Error::new(
+            ErrorKind::Other,
+            "ICMPv4 received destination unreachable",
+        )),
+        IcmpV4MessageType::EchoReply => unreachable!(),
     }
 }
