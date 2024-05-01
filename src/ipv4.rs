@@ -36,11 +36,10 @@ pub fn calculate_checksum(data: &[u8], skipword: usize) -> u16 {
     let mut sum = 0u32;
     let mut i = 0;
 
-    while cur_data.len() > 2 {
+    while cur_data.len() >= 2 {
         if i != skipword {
             sum += u16::from_be_bytes(cur_data[0..2].try_into().unwrap()) as u32;
         }
-
         cur_data = &cur_data[2..];
         i += 1;
     }
@@ -50,7 +49,7 @@ pub fn calculate_checksum(data: &[u8], skipword: usize) -> u16 {
     }
 
     while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
+        sum = (sum >> 16) + (sum & 0xFFFF);
     }
 
     !sum as u16
@@ -73,11 +72,10 @@ pub fn ipv4_recv(frame_data: &[u8]) -> Result<()> {
         return Err(Error::new(ErrorKind::InvalidData, "Datagram ttl reached 0"));
     }
 
-    eprintln!("Csum");
     let header_length = hdr.ihl() as usize * 4;
 
     let csum = calculate_checksum(&frame_data[..header_length], 5);
-    if csum != 0 {
+    if csum != hdr.checksum() {
         return Err(Error::new(ErrorKind::InvalidData, "Invalid checksum"));
     }
 
