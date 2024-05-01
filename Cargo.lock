@@ -364,7 +364,6 @@ name = "tcp-ip"
 version = "0.1.0"
 dependencies = [
  "bitfield",
- "cc",
  "ifstructs",
  "libc",
  "tun-tap",

@@ -1,5 +1,6 @@
 use bitfield::bitfield;
 use libc::c_void;
+use std::io::{Error, ErrorKind, Result};
 
 extern "C" {
     fn checksum(addr: *const c_void, count: i32) -> u16;
@@ -25,8 +26,60 @@ bitfield! {
     pub u32, dst_addr, set_dst_addr: 159, 128;
 }
 
-pub fn calculate_checksum(hdr: &u8, count: i32) -> u16 {
-    unsafe {
-        checksum(hdr as *const u8 as *const c_void, count)
+pub fn calculate_checksum(data: &[u8], skipword: usize) -> u16 {
+    if data.len() == 0 {
+        return 0;
     }
+
+    let len = data.len();
+    let mut cur_data = &data[..];
+    let mut sum = 0u32;
+    let mut i = 0;
+
+    while cur_data.len() > 2 {
+        if i != skipword {
+            sum += u16::from_be_bytes(cur_data[0..2].try_into().unwrap()) as u32;
+        }
+
+        cur_data = &cur_data[2..];
+        i += 1;
+    }
+
+    if i != skipword && len & 1 != 0 {
+        sum += (data[len - 1] as u32) << 8;
+    }
+
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    !sum as u16
+}
+
+pub fn ipv4_recv(frame_data: &[u8]) -> Result<()> {
+    let hdr = IpV4Header(frame_data);
+    if hdr.version() != 4 {
+        return Err(Error::new(ErrorKind::Unsupported, "Ip version is not 4"));
+    }
+
+    if hdr.ihl() < 5 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Packet length must be at least 5",
+        ));
+    }
+
+    if hdr.ttl() == 0 {
+        return Err(Error::new(ErrorKind::InvalidData, "Datagram ttl reached 0"));
+    }
+
+    eprintln!("Csum");
+    let header_length = hdr.ihl() as usize * 4;
+
+    let csum = calculate_checksum(&frame_data[..header_length], 5);
+    if csum != 0 {
+        return Err(Error::new(ErrorKind::InvalidData, "Invalid checksum"));
+    }
+
+    Ok(())
 }
