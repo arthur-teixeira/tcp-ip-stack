@@ -1,18 +1,18 @@
 use arp::{arp_recv, ArpCache};
+use buf_writer::BufWriter;
+use buffer_view::BufferView;
+use frame::Frame;
+use ipv4::*;
 use libc::c_int;
 use std::io::Result;
 use tun_tap::{Iface, Mode};
-use buffer_view::BufferView;
-use buf_writer::BufWriter;
-use frame::Frame;
-use ipv4::*;
 
 mod arp;
-mod buffer_view;
 mod buf_writer;
+mod buffer_view;
 mod frame;
-mod ipv4;
 mod icmpv4;
+mod ipv4;
 
 fn main() -> Result<()> {
     let mut iface = Iface::without_packet_info("tap1", Mode::Tap)?;
@@ -25,13 +25,15 @@ fn main() -> Result<()> {
         match frame.ethertype as c_int {
             libc::ETH_P_ARP => {
                 eprintln!("Receiving ARP packet");
-                arp_recv(frame.payload, &mut arp_cache, &mut iface)?;
+                if let Err(e) = arp_recv(frame.payload, &mut arp_cache, &mut iface) {
+                    eprintln!("Error: {e}");
+                }
             }
             libc::ETH_P_IP => {
                 eprintln!("Receiving IP packet");
-                match ipv4_recv(frame.payload) {
-                    Ok(_) => {},
-                    Err(e) => eprintln!("Error: {e}"),
+                if let Err(_) = ipv4_recv(frame.payload) {
+                    continue;
+                    // eprintln!("Error: {e}");
                 }
             }
             // libc::ETH_P_IPV6 => eprintln!("Receiving IPv6 packet"),

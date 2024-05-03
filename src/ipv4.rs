@@ -3,9 +3,9 @@ use std::io::{Error, ErrorKind, Result};
 
 use crate::icmpv4;
 
-const IPV4: u8 =  0x04;
-const IP_TCP: u8 =  0x06;
-const ICMPV4: u8 =  0x01;
+const IPV4: u8 = 0x04;
+const IP_TCP: u8 = 0x06;
+const ICMPV4: u8 = 0x01;
 
 bitfield! {
     pub struct IpV4Header (MSB0 [u8]);
@@ -27,8 +27,18 @@ bitfield! {
     pub u32, dst_addr, set_dst_addr: 159, 128;
 }
 
-pub fn ipv4_data<'a>(hdr: &'a [u8]) -> &'a [u8] {
-    &hdr[160..]
+pub struct IpV4Packet<'a>(&'a [u8]);
+
+impl IpV4Packet<'_> {
+    const IPV4_HEADER_SIZE: usize = 20;
+
+    pub fn header(&self) -> IpV4Header<&[u8]> {
+        IpV4Header(self.0)
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.0[Self::IPV4_HEADER_SIZE..]
+    }
 }
 
 pub fn calculate_checksum(data: &[u8], skipword: usize) -> u16 {
@@ -61,7 +71,9 @@ pub fn calculate_checksum(data: &[u8], skipword: usize) -> u16 {
 }
 
 pub fn ipv4_recv(frame_data: &[u8]) -> Result<()> {
-    let hdr = IpV4Header(frame_data);
+    let packet = IpV4Packet(frame_data);
+    let hdr = packet.header();
+
     if hdr.version() != 4 {
         return Err(Error::new(ErrorKind::Unsupported, "Ip version is not 4"));
     }
@@ -85,7 +97,7 @@ pub fn ipv4_recv(frame_data: &[u8]) -> Result<()> {
     }
 
     match hdr.proto() {
-        ICMPV4 => icmpv4::icmpv4_incoming(frame_data),
+        ICMPV4 => icmpv4::icmpv4_incoming(packet),
         _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol")),
     }
 }

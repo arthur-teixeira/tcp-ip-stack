@@ -1,7 +1,7 @@
-use crate::{buf_writer::BufWriter, calculate_checksum, ipv4_data, BufferView};
+use crate::{buf_writer::BufWriter, calculate_checksum, BufferView, IpV4Packet};
 use std::io::{Error, ErrorKind, Result};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum IcmpV4MessageType {
     EchoReply = 0,
     DestinationUnreachable = 3,
@@ -22,6 +22,7 @@ impl IcmpV4MessageType {
     }
 }
 
+#[derive(Debug)]
 pub struct IcmpV4Header<'a> {
     message_type: IcmpV4MessageType,
     code: u8,
@@ -55,6 +56,7 @@ impl<'a> IcmpV4Header<'a> {
     }
 }
 
+#[derive(Debug)]
 pub enum IcmpV4Message<'a> {
     Echo { id: u16, seq: u16, data: &'a [u8] },
     DstUnreachable { len: u8, var: u16, data: &'a [u8] },
@@ -121,8 +123,8 @@ fn icmpv4_reply(mut icmp_hdr: IcmpV4Header) -> Result<()> {
     Ok(())
 }
 
-pub fn icmpv4_incoming(ip_frame: &[u8]) -> Result<()> {
-    let ip_data = ipv4_data(ip_frame);
+pub fn icmpv4_incoming(ip_packet: IpV4Packet) -> Result<()> {
+    let ip_data = ip_packet.data();
     let mut buf_view = BufferView::from_slice(ip_data)?;
     let icmp_hdr = IcmpV4Header::from_buffer(&mut buf_view)?;
 
