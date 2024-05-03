@@ -1,5 +1,5 @@
-use crate::{buf_writer::BufWriter, calculate_checksum, BufferView, IpV4Packet};
-use std::io::{Error, ErrorKind, Result};
+use crate::{arp::ArpCache, buf_writer::BufWriter, calculate_checksum, ipv4_send, BufferView, IpV4Packet, WritableIpV4Packet};
+use std::{io::{Error, ErrorKind, Result}, net::Ipv4Addr};
 
 #[derive(Clone, Copy, Debug)]
 pub enum IcmpV4MessageType {
@@ -112,24 +112,31 @@ impl<'a> IcmpV4Message<'a> {
     }
 }
 
-fn icmpv4_reply(mut icmp_hdr: IcmpV4Header) -> Result<()> {
+fn icmpv4_reply(ip_packet: IpV4Packet, mut icmp_hdr: IcmpV4Header, arp_cache: &ArpCache) -> Result<()> {
     icmp_hdr.message_type = IcmpV4MessageType::EchoReply;
     icmp_hdr.csum = 0;
     icmp_hdr.csum = calculate_checksum(&icmp_hdr.to_bytes(), 1);
 
-    // TODO: wrap ICMP packet in an IP frame, and then wrap that into an Ethernet frame.
-    // Isolate Ethernet / IP / ICMP frame formatting.
+    let daddr = Ipv4Addr::from(ip_packet.header().src_addr());
 
-    Ok(())
+    ipv4_send(&ip_packet, &icmp_hdr.to_bytes(), daddr, arp_cache)
 }
 
-pub fn icmpv4_incoming(ip_packet: IpV4Packet) -> Result<()> {
+pub fn icmpv4_incoming(ip_packet: IpV4Packet, arp_cache: &ArpCache) -> Result<()> {
     let ip_data = ip_packet.data();
     let mut buf_view = BufferView::from_slice(ip_data)?;
     let icmp_hdr = IcmpV4Header::from_buffer(&mut buf_view)?;
 
+    let csum = calculate_checksum(ip_data, 1);
+    if csum != icmp_hdr.csum {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Checksum does not match",
+        ));
+    }
+
     match icmp_hdr.message_type {
-        IcmpV4MessageType::EchoRequest => icmpv4_reply(icmp_hdr),
+        IcmpV4MessageType::EchoRequest => icmpv4_reply(ip_packet, icmp_hdr, arp_cache),
         IcmpV4MessageType::DestinationUnreachable => Err(Error::new(
             ErrorKind::Other,
             "ICMPv4 received destination unreachable",

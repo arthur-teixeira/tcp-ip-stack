@@ -1,7 +1,7 @@
 use arp::{arp_recv, ArpCache};
 use buf_writer::BufWriter;
 use buffer_view::BufferView;
-use frame::Frame;
+use ethernet::Frame;
 use ipv4::*;
 use libc::c_int;
 use std::io::Result;
@@ -10,7 +10,7 @@ use tun_tap::{Iface, Mode};
 mod arp;
 mod buf_writer;
 mod buffer_view;
-mod frame;
+mod ethernet;
 mod icmpv4;
 mod ipv4;
 
@@ -31,7 +31,7 @@ fn main() -> Result<()> {
             }
             libc::ETH_P_IP => {
                 eprintln!("Receiving IP packet");
-                if let Err(_) = ipv4_recv(frame.payload) {
+                if let Err(_) = ipv4_recv(frame.payload, &arp_cache) {
                     continue;
                     // eprintln!("Error: {e}");
                 }

@@ -22,8 +22,8 @@ impl TunInterface for Iface {
 
 pub type ArpCache = HashMap<String, ArpIpv4>;
 
-static IP_ADDR: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 7);
-const MAC_OCTETS: [u8; 6] = [0, 0x0b, 0x29, 0x6f, 0x50, 0x24];
+pub static IP_ADDR: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 7);
+pub const MAC_OCTETS: [u8; 6] = [0, 0x0b, 0x29, 0x6f, 0x50, 0x24];
 
 const ARP_ETHERNET: u16 = 0x0001;
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -227,7 +227,7 @@ mod arp_test {
         os::unix::fs::FileExt,
     };
 
-    use crate::frame::Frame;
+    use crate::ethernet::Frame;
 
     use super::*;
     const FRAME: &[u8] = &[
@@ -328,11 +328,14 @@ mod arp_test {
 
         let arp_ipv4 = ArpIpv4::from_header(&arp_hdr).expect("Expected valid ipv4 arp packet");
 
-        assert_eq!(arp_ipv4, ArpIpv4 {
+        assert_eq!(
+            arp_ipv4,
+            ArpIpv4 {
                 smac: MAC_OCTETS,
                 sip: Ipv4Addr::new(10, 0, 0, 7),
                 dmac: [42, 125, 214, 5, 152, 164],
                 dip: Ipv4Addr::new(192, 168, 100, 1),
-            });
+            }
+        );
     }
 }
