@@ -2,13 +2,15 @@ use bitfield::bitfield;
 use std::io::{Error, ErrorKind, Result};
 use std::net::Ipv4Addr;
 
-use crate::arp::{ArpHwType, TunInterface, MAC_OCTETS};
+use crate::arp::{ArpHwType, ArpCache, TunInterface, MAC_OCTETS};
 use crate::ethernet::Frame;
-use crate::{arp::ArpCache, icmpv4};
+use crate::{icmpv4, udp};
+use crate::utils::calculate_checksum;
 
-const IPV4: u8 = 0x04;
-const IP_TCP: u8 = 0x06;
-const ICMPV4: u8 = 0x01;
+pub const IPV4: u8 = 0x04;
+pub const IP_TCP: u8 = 0x06;
+pub const IP_UDP: u8 = 0x11;
+pub const ICMPV4: u8 = 0x01;
 
 bitfield! {
     pub struct IpV4Header (MSB0 [u8]);
@@ -65,35 +67,6 @@ impl<'a> WritableIpV4Packet<'a> {
     }
 }
 
-pub fn calculate_checksum(data: &[u8], skipword: usize) -> u16 {
-    if data.len() == 0 {
-        return 0;
-    }
-
-    let len = data.len();
-    let mut cur_data = &data[..];
-    let mut sum = 0u32;
-    let mut i = 0;
-
-    while cur_data.len() >= 2 {
-        if i != skipword {
-            sum += u16::from_be_bytes(cur_data[0..2].try_into().unwrap()) as u32;
-        }
-        cur_data = &cur_data[2..];
-        i += 1;
-    }
-
-    if i != skipword && len & 1 != 0 {
-        sum += (data[len - 1] as u32) << 8;
-    }
-
-    while sum >> 16 != 0 {
-        sum = (sum >> 16) + (sum & 0xFFFF);
-    }
-
-    !sum as u16
-}
-
 pub fn ipv4_recv(
     frame_data: &[u8],
     arp_cache: &ArpCache,
@@ -126,6 +99,11 @@ pub fn ipv4_recv(
 
     match hdr.proto() {
         ICMPV4 => icmpv4::icmpv4_incoming(packet, arp_cache, iface),
+        IP_TCP => {
+            eprintln!("TCP packet received");
+            Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol"))
+        },
+        IP_UDP => udp::udp_incoming(packet, iface),
         _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol")),
     }
 }
@@ -189,5 +167,4 @@ pub fn ipv4_send(
     } else {
         Ok(())
     }
-
 }

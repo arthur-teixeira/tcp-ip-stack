@@ -3,7 +3,7 @@ use std::io::Result;
 use crate::arp::TunInterface;
 
 pub struct BufferView {
-    pub buf: Vec<u8>,
+    pub buf: Box<[u8]>,
     pub size: usize,
     pub pos: usize,
 }
@@ -34,7 +34,7 @@ impl BufferView {
         let mut buffer = [0; 1500];
         let nb = f.rcv(&mut buffer)?;
         Ok(Self {
-            buf: buffer.to_vec(),
+            buf: Box::new(buffer),
             size: nb,
             pos: 0,
         })

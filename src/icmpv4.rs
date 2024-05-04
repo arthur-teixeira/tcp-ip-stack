@@ -1,7 +1,8 @@
 use crate::{
     arp::{ArpCache, TunInterface},
     buf_writer::BufWriter,
-    calculate_checksum, ipv4_send, BufferView, IpV4Packet,
+    utils::calculate_checksum,
+    ipv4_send, BufferView, IpV4Packet,
 };
 use std::{
     io::{Error, ErrorKind, Result},

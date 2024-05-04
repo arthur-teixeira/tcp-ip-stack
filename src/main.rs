@@ -13,6 +13,8 @@ mod buffer_view;
 mod ethernet;
 mod icmpv4;
 mod ipv4;
+mod udp;
+mod utils;
 
 fn main() -> Result<()> {
     let mut iface = Iface::without_packet_info("tap1", Mode::Tap)?;
