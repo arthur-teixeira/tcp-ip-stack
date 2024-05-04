@@ -2,6 +2,8 @@ use bitfield::bitfield;
 use std::io::{Error, ErrorKind, Result};
 use std::net::Ipv4Addr;
 
+use crate::arp::{ArpHwType, TunInterface, MAC_OCTETS};
+use crate::ethernet::Frame;
 use crate::{arp::ArpCache, icmpv4};
 
 const IPV4: u8 = 0x04;
@@ -34,10 +36,6 @@ pub struct WritableIpV4Packet<'a>(&'a mut [u8]);
 impl IpV4Packet<'_> {
     const IPV4_HEADER_SIZE: usize = 20;
 
-    pub fn raw(&self) -> &[u8] {
-        &self.0
-    }
-
     pub fn header(&self) -> IpV4Header<&[u8]> {
         IpV4Header(self.0)
     }
@@ -49,10 +47,6 @@ impl IpV4Packet<'_> {
 
 impl<'a> WritableIpV4Packet<'a> {
     const IPV4_HEADER_SIZE: usize = 20;
-
-    pub fn init(buf: &'a mut [u8]) -> Self {
-        Self(buf)
-    }
 
     pub fn header(&mut self) -> IpV4Header<&mut [u8]> {
         IpV4Header(self.0)
@@ -100,7 +94,11 @@ pub fn calculate_checksum(data: &[u8], skipword: usize) -> u16 {
     !sum as u16
 }
 
-pub fn ipv4_recv(frame_data: &[u8], arp_cache: &ArpCache) -> Result<()> {
+pub fn ipv4_recv(
+    frame_data: &[u8],
+    arp_cache: &ArpCache,
+    iface: &mut dyn TunInterface,
+) -> Result<()> {
     let packet = IpV4Packet(frame_data);
     let hdr = packet.header();
 
@@ -127,34 +125,69 @@ pub fn ipv4_recv(frame_data: &[u8], arp_cache: &ArpCache) -> Result<()> {
     }
 
     match hdr.proto() {
-        ICMPV4 => icmpv4::icmpv4_incoming(packet, arp_cache),
+        ICMPV4 => icmpv4::icmpv4_incoming(packet, arp_cache, iface),
         _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol")),
     }
 }
 
-pub fn ipv4_send(request: &IpV4Packet, data: &[u8], daddr: Ipv4Addr, arp_cache: &ArpCache) -> Result<()> {
-    let mut response_buffer: Vec<u8> = Vec::new();
+pub fn ipv4_send(
+    request: &IpV4Packet,
+    data: &[u8],
+    daddr: Ipv4Addr,
+    arp_cache: &ArpCache,
+    iface: &mut dyn TunInterface,
+) -> Result<()> {
+    let len: u16 = data.len() as u16 + 20;
+    let mut response_buffer = vec![0; len as usize];
     let mut response_packet = WritableIpV4Packet(&mut response_buffer);
     let mut hdr = response_packet.header();
     hdr.set_version(IPV4);
     hdr.set_ihl(0x05);
     hdr.set_tos(0);
-    hdr.set_len(data.len().try_into().unwrap());
+    hdr.set_len(len);
     hdr.set_id(request.header().id());
     hdr.set_frag_offset(0x4000);
+    hdr.set_df(request.header().df());
+    hdr.set_mf(request.header().mf());
     hdr.set_ttl(64);
     hdr.set_proto(ICMPV4); // TODO: this is hardcoded
     hdr.set_src_addr(crate::arp::IP_ADDR.into());
     hdr.set_dst_addr(daddr.into());
     hdr.set_checksum(0);
+    response_packet.set_data(data);
 
     let csum = calculate_checksum(response_packet.raw_header(), 5);
 
     let mut hdr = response_packet.header();
     hdr.set_checksum(csum);
 
-    // TODO: Look for destination hw address in ARP cache, build the ethernet frame and send it
-    // through device.
+    let k = format!("{}-{}", ArpHwType::Ethernet.to_u16(), daddr);
 
-    todo!()
+    let arp_entry = match arp_cache.get(&k) {
+        Some(arp_entry) => arp_entry,
+        // TODO: Send ARP request and retry later
+        None => {
+            return Err(Error::new(
+                ErrorKind::AddrNotAvailable,
+                "MAC address was not in cache",
+            ))
+        }
+    };
+
+    let frame = Frame {
+        smac: MAC_OCTETS,
+        dmac: arp_entry.smac,
+        ethertype: libc::ETH_P_IP as u16,
+        payload: &response_buffer,
+    };
+
+    let response = &frame.to_buffer();
+    let snt = iface.snd(response)?;
+
+    if snt != response.len() {
+        Err(Error::new(ErrorKind::Other, "Could not send full response"))
+    } else {
+        Ok(())
+    }
+
 }

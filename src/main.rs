@@ -31,9 +31,8 @@ fn main() -> Result<()> {
             }
             libc::ETH_P_IP => {
                 eprintln!("Receiving IP packet");
-                if let Err(_) = ipv4_recv(frame.payload, &arp_cache) {
-                    continue;
-                    // eprintln!("Error: {e}");
+                if let Err(e) = ipv4_recv(frame.payload, &arp_cache, &mut iface) {
+                    eprintln!("Error: {e}");
                 }
             }
             // libc::ETH_P_IPV6 => eprintln!("Receiving IPv6 packet"),

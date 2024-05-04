@@ -1,5 +1,12 @@
-use crate::{arp::ArpCache, buf_writer::BufWriter, calculate_checksum, ipv4_send, BufferView, IpV4Packet, WritableIpV4Packet};
-use std::{io::{Error, ErrorKind, Result}, net::Ipv4Addr};
+use crate::{
+    arp::{ArpCache, TunInterface},
+    buf_writer::BufWriter,
+    calculate_checksum, ipv4_send, BufferView, IpV4Packet,
+};
+use std::{
+    io::{Error, ErrorKind, Result},
+    net::Ipv4Addr,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub enum IcmpV4MessageType {
@@ -112,17 +119,26 @@ impl<'a> IcmpV4Message<'a> {
     }
 }
 
-fn icmpv4_reply(ip_packet: IpV4Packet, mut icmp_hdr: IcmpV4Header, arp_cache: &ArpCache) -> Result<()> {
+fn icmpv4_reply(
+    ip_packet: IpV4Packet,
+    mut icmp_hdr: IcmpV4Header,
+    arp_cache: &ArpCache,
+    iface: &mut dyn TunInterface,
+) -> Result<()> {
     icmp_hdr.message_type = IcmpV4MessageType::EchoReply;
     icmp_hdr.csum = 0;
     icmp_hdr.csum = calculate_checksum(&icmp_hdr.to_bytes(), 1);
 
     let daddr = Ipv4Addr::from(ip_packet.header().src_addr());
 
-    ipv4_send(&ip_packet, &icmp_hdr.to_bytes(), daddr, arp_cache)
+    ipv4_send(&ip_packet, &icmp_hdr.to_bytes(), daddr, arp_cache, iface)
 }
 
-pub fn icmpv4_incoming(ip_packet: IpV4Packet, arp_cache: &ArpCache) -> Result<()> {
+pub fn icmpv4_incoming(
+    ip_packet: IpV4Packet,
+    arp_cache: &ArpCache,
+    iface: &mut dyn TunInterface,
+) -> Result<()> {
     let ip_data = ip_packet.data();
     let mut buf_view = BufferView::from_slice(ip_data)?;
     let icmp_hdr = IcmpV4Header::from_buffer(&mut buf_view)?;
@@ -136,7 +152,7 @@ pub fn icmpv4_incoming(ip_packet: IpV4Packet, arp_cache: &ArpCache) -> Result<()
     }
 
     match icmp_hdr.message_type {
-        IcmpV4MessageType::EchoRequest => icmpv4_reply(ip_packet, icmp_hdr, arp_cache),
+        IcmpV4MessageType::EchoRequest => icmpv4_reply(ip_packet, icmp_hdr, arp_cache, iface),
         IcmpV4MessageType::DestinationUnreachable => Err(Error::new(
             ErrorKind::Other,
             "ICMPv4 received destination unreachable",

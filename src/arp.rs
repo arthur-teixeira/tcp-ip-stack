@@ -32,14 +32,14 @@ pub enum ArpHwType {
 }
 
 impl ArpHwType {
-    fn from_u16(n: u16) -> Result<Self> {
+    pub fn from_u16(n: u16) -> Result<Self> {
         match n {
             ARP_ETHERNET => Ok(Self::Ethernet),
             _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported HW type")),
         }
     }
 
-    fn to_u16(&self) -> u16 {
+    pub fn to_u16(&self) -> u16 {
         *self as u16
     }
 }
@@ -130,10 +130,10 @@ impl ArpHeader {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[repr(packed)]
 pub struct ArpIpv4 {
-    smac: [u8; 6],
-    sip: Ipv4Addr,
-    dmac: [u8; 6],
-    dip: Ipv4Addr,
+    pub smac: [u8; 6],
+    pub sip: Ipv4Addr,
+    pub dmac: [u8; 6],
+    pub dip: Ipv4Addr,
 }
 
 impl ArpIpv4 {
