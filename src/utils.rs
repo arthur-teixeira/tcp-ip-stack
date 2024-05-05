@@ -56,6 +56,7 @@ pub fn ipv4_checksum(
     sum += ipv4_word_sum(source);
     sum += ipv4_word_sum(destination);
     sum += next_level_protocol as u32;
+    sum += data.len() as u32;
     sum += sum_words(data, skipword);
 
     finalize_checksum(sum)

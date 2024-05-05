@@ -103,7 +103,7 @@ pub fn ipv4_recv(
             eprintln!("TCP packet received");
             Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol"))
         },
-        IP_UDP => udp::udp_incoming(packet, iface),
+        IP_UDP => udp::udp_incoming(packet),
         _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol")),
     }
 }

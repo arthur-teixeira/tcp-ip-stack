@@ -60,7 +60,7 @@ impl<'a> UserDatagram<'a> {
     }
 }
 
-pub fn udp_incoming(packet: IpV4Packet, iface: &mut dyn TunInterface) -> Result<()> {
+pub fn udp_incoming(packet: IpV4Packet) -> Result<()> {
     let mut buf_view = BufferView::from_slice(packet.data())?;
     let dgram = UserDatagram::from_buffer(&mut buf_view);
     eprintln!("Got dgram: {:?}", dgram);
@@ -69,5 +69,6 @@ pub fn udp_incoming(packet: IpV4Packet, iface: &mut dyn TunInterface) -> Result<
         return Err(Error::new(ErrorKind::InvalidData, "Checksum does not match"));
     }
 
+    // TODO: integrate into future socket API and send data to destination port
     Ok(())
 }
