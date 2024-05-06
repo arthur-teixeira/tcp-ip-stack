@@ -3,7 +3,7 @@ use std::{
     net::Ipv4Addr,
 };
 
-use crate::{arp::TunInterface, utils, BufWriter, BufferView, IpV4Packet};
+use crate::{arp::TunInterface, utils, BufWriter, BufferView, IpProtocol, IpV4Packet};
 
 #[derive(Debug)]
 pub struct UserDatagram<'a> {
@@ -51,10 +51,8 @@ impl<'a> UserDatagram<'a> {
             3,
             src_ip,
             dst_ip,
-            crate::ipv4::IP_UDP,
+            IpProtocol::UDP as u8,
         );
-
-        eprintln!("Checksum result: {result}");
 
         result == self.checksum
     }
@@ -63,7 +61,6 @@ impl<'a> UserDatagram<'a> {
 pub fn udp_incoming(packet: IpV4Packet) -> Result<()> {
     let mut buf_view = BufferView::from_slice(packet.data())?;
     let dgram = UserDatagram::from_buffer(&mut buf_view);
-    eprintln!("Got dgram: {:?}", dgram);
 
     if !dgram.validate_checksum(&packet) {
         return Err(Error::new(ErrorKind::InvalidData, "Checksum does not match"));

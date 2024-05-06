@@ -4,13 +4,20 @@ use std::net::Ipv4Addr;
 
 use crate::arp::{ArpHwType, ArpCache, TunInterface, MAC_OCTETS};
 use crate::ethernet::Frame;
-use crate::{icmpv4, udp};
+use crate::{icmpv4, tcp, udp};
 use crate::utils::calculate_checksum;
 
 pub const IPV4: u8 = 0x04;
 pub const IP_TCP: u8 = 0x06;
 pub const IP_UDP: u8 = 0x11;
 pub const ICMPV4: u8 = 0x01;
+
+pub enum IpProtocol {
+    IPV4 = IPV4 as isize,
+    TCP = IP_TCP as isize,
+    UDP = IP_UDP as isize,
+    ICMPV4 = ICMPV4 as isize,
+}
 
 bitfield! {
     pub struct IpV4Header (MSB0 [u8]);
@@ -100,9 +107,9 @@ pub fn ipv4_recv(
     match hdr.proto() {
         ICMPV4 => icmpv4::icmpv4_incoming(packet, arp_cache, iface),
         IP_TCP => {
-            eprintln!("TCP packet received");
-            Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol"))
-        },
+            println!("Incoming TCP connection");
+            tcp::tcp_incoming(packet, iface, arp_cache)
+        }
         IP_UDP => udp::udp_incoming(packet),
         _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol")),
     }
@@ -113,6 +120,7 @@ pub fn ipv4_send(
     data: &[u8],
     daddr: Ipv4Addr,
     arp_cache: &ArpCache,
+    protocol: IpProtocol,
     iface: &mut dyn TunInterface,
 ) -> Result<()> {
     let len: u16 = data.len() as u16 + 20;
@@ -128,7 +136,7 @@ pub fn ipv4_send(
     hdr.set_df(request.header().df());
     hdr.set_mf(request.header().mf());
     hdr.set_ttl(64);
-    hdr.set_proto(ICMPV4); // TODO: this is hardcoded
+    hdr.set_proto(protocol as u8);
     hdr.set_src_addr(crate::arp::IP_ADDR.into());
     hdr.set_dst_addr(daddr.into());
     hdr.set_checksum(0);

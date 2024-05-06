@@ -1,4 +1,5 @@
 use crate::{
+    IpProtocol,
     arp::{ArpCache, TunInterface},
     buf_writer::BufWriter,
     utils::calculate_checksum,
@@ -132,7 +133,7 @@ fn icmpv4_reply(
 
     let daddr = Ipv4Addr::from(ip_packet.header().src_addr());
 
-    ipv4_send(&ip_packet, &icmp_hdr.to_bytes(), daddr, arp_cache, iface)
+    ipv4_send(&ip_packet, &icmp_hdr.to_bytes(), daddr, arp_cache, IpProtocol::ICMPV4, iface)
 }
 
 pub fn icmpv4_incoming(
