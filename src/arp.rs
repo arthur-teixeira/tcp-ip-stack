@@ -1,6 +1,6 @@
 use tun_tap::Iface;
 
-use crate::{BufWriter, BufferView};
+use crate::{BufWriter, BufferView, Interface};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::net::Ipv4Addr;
@@ -163,7 +163,7 @@ unsafe fn struct_to_bytes<T: Sized>(p: &T) -> &[u8] {
 fn arp_reply(
     mut header: ArpHeader,
     packet: &ArpIpv4,
-    iface: &mut dyn TunInterface,
+    interface: &mut Interface,
 ) -> Result<usize> {
     let response_packet = ArpIpv4 {
         dip: packet.sip,
@@ -183,20 +183,19 @@ fn arp_reply(
     };
 
     let ether_buf = ether_frame.to_buffer();
-    iface.snd(&ether_buf)
+    interface.iface.snd(&ether_buf)
 }
 
 pub fn arp_recv(
     frame_data: &[u8],
-    cache: &mut ArpCache,
-    iface: &mut dyn TunInterface,
+    interface: &mut Interface,
 ) -> Result<usize> {
     let arp_hdr = ArpHeader::from_bytes(frame_data)?;
     let arp_ipv4 = ArpIpv4::from_header(&arp_hdr)?;
 
     let cache_key = format!("{}-{}", arp_hdr.hwtype.to_u16(), arp_ipv4.sip);
 
-    let merge = match cache.get_mut(&cache_key) {
+    let merge = match interface.arp_cache.get_mut(&cache_key) {
         Some(entry) => {
             entry.smac = arp_ipv4.smac;
             true
@@ -210,11 +209,11 @@ pub fn arp_recv(
     }
 
     if !merge {
-        cache.insert(cache_key, arp_ipv4.clone());
+        interface.arp_cache.insert(cache_key, arp_ipv4.clone());
     }
 
     match arp_hdr.opcode {
-        ArpOp::ArpRequest => arp_reply(arp_hdr, &arp_ipv4, iface),
+        ArpOp::ArpRequest => arp_reply(arp_hdr, &arp_ipv4, interface),
         _ => Ok(0),
     }
 }
@@ -227,7 +226,7 @@ mod arp_test {
         os::unix::fs::FileExt,
     };
 
-    use crate::ethernet::Frame;
+    use crate::{ethernet::Frame, tcp::Connections};
 
     use super::*;
     const FRAME: &[u8] = &[
@@ -285,15 +284,22 @@ mod arp_test {
 
     #[test]
     fn test_arp_recv() {
-        let mut temp_file = MockTun::new("/tmp/mock_tun");
-        let mut arp_cache = ArpCache::new();
-        let snt = arp_recv(FRAME, &mut arp_cache, &mut temp_file)
+        let temp_file = MockTun::new("/tmp/mock_tun");
+        let arp_cache = ArpCache::new();
+
+        let mut interface = Interface {
+            iface: Box::new(temp_file),
+            arp_cache,
+            tcp_connections: Connections::default()
+        };
+
+        let snt = arp_recv(FRAME, &mut interface)
             .expect("Expected to receive data correctly");
 
         assert_eq!(snt, 42);
 
         let mut response: [u8; 42] = [0; 42];
-        let rcvd = temp_file
+        let rcvd = interface.iface
             .rcv(&mut response)
             .expect("Expected to read response");
 

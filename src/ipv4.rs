@@ -2,9 +2,9 @@ use bitfield::bitfield;
 use std::io::{Error, ErrorKind, Result};
 use std::net::Ipv4Addr;
 
-use crate::arp::{ArpHwType, ArpCache, TunInterface, MAC_OCTETS};
+use crate::arp::{ArpHwType, MAC_OCTETS};
 use crate::ethernet::Frame;
-use crate::{icmpv4, tcp, udp};
+use crate::{icmpv4, tcp, udp, Interface};
 use crate::utils::calculate_checksum;
 
 pub const IPV4: u8 = 0x04;
@@ -13,7 +13,6 @@ pub const IP_UDP: u8 = 0x11;
 pub const ICMPV4: u8 = 0x01;
 
 pub enum IpProtocol {
-    IPV4 = IPV4 as isize,
     TCP = IP_TCP as isize,
     UDP = IP_UDP as isize,
     ICMPV4 = ICMPV4 as isize,
@@ -24,6 +23,8 @@ bitfield! {
     impl Debug;
     impl PartialEq;
     impl Eq;
+    impl Copy;
+    impl Hash;
     pub u8, version, set_version: 3, 0;
     pub u8, ihl, set_ihl: 7, 4;
     pub u8, tos, set_tos: 15, 8;
@@ -39,7 +40,9 @@ bitfield! {
     pub u32, dst_addr, set_dst_addr: 159, 128;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IpV4Packet<'a>(&'a [u8]);
+
 pub struct WritableIpV4Packet<'a>(&'a mut [u8]);
 
 impl IpV4Packet<'_> {
@@ -76,8 +79,7 @@ impl<'a> WritableIpV4Packet<'a> {
 
 pub fn ipv4_recv(
     frame_data: &[u8],
-    arp_cache: &ArpCache,
-    iface: &mut dyn TunInterface,
+    interface: &mut Interface,
 ) -> Result<()> {
     let packet = IpV4Packet(frame_data);
     let hdr = packet.header();
@@ -105,10 +107,10 @@ pub fn ipv4_recv(
     }
 
     match hdr.proto() {
-        ICMPV4 => icmpv4::icmpv4_incoming(packet, arp_cache, iface),
+        ICMPV4 => icmpv4::icmpv4_incoming(packet, interface),
         IP_TCP => {
             println!("Incoming TCP connection");
-            tcp::tcp_incoming(packet, iface, arp_cache)
+            tcp::tcp_incoming(packet, interface)
         }
         IP_UDP => udp::udp_incoming(packet),
         _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol")),
@@ -119,9 +121,8 @@ pub fn ipv4_send(
     request: &IpV4Packet,
     data: &[u8],
     daddr: Ipv4Addr,
-    arp_cache: &ArpCache,
     protocol: IpProtocol,
-    iface: &mut dyn TunInterface,
+    interface: &mut Interface,
 ) -> Result<()> {
     let len: u16 = data.len() as u16 + 20;
     let mut response_buffer = vec![0; len as usize];
@@ -149,7 +150,7 @@ pub fn ipv4_send(
 
     let k = format!("{}-{}", ArpHwType::Ethernet.to_u16(), daddr);
 
-    let arp_entry = match arp_cache.get(&k) {
+    let arp_entry = match interface.arp_cache.get(&k) {
         Some(arp_entry) => arp_entry,
         // TODO: Send ARP request and retry later
         None => {
@@ -168,7 +169,7 @@ pub fn ipv4_send(
     };
 
     let response = &frame.to_buffer();
-    let snt = iface.snd(response)?;
+    let snt = interface.iface.snd(response)?;
 
     if snt != response.len() {
         Err(Error::new(ErrorKind::Other, "Could not send full response"))

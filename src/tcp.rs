@@ -1,20 +1,18 @@
 use std::{
+    collections::HashMap,
     io::{Error, ErrorKind, Result},
     net::Ipv4Addr,
 };
 
-use crate::{
-    arp::{ArpCache, TunInterface},
-    ipv4_send, utils, IpProtocol, IpV4Packet,
-};
+use crate::{ipv4_send, utils, Interface, IpProtocol, IpV4Packet};
 
 use bitfield::bitfield;
-use libc::wait;
 
 bitfield! {
     pub struct TcpHeader (MSB0 [u8]);
     impl Debug;
     impl PartialEq;
+    impl Copy;
     impl Eq;
     pub u16, src_port, set_src_port: 15, 0;
     pub u16, dst_port, set_dst_port: 31, 16;
@@ -35,18 +33,14 @@ bitfield! {
     pub u16, urgent_ptr, set_urgent_ptr: 159, 144;
 }
 
-#[derive(Debug)]
+pub type Connections<'a> = HashMap<Quad, Connection<'a>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TcpPacket<'a>(&'a [u8]);
 
 impl TcpPacket<'_> {
-    const TCP_HEADER_SIZE: usize = 20;
-
     pub fn header(&self) -> TcpHeader<&[u8]> {
         TcpHeader(self.0)
-    }
-
-    pub fn data(&self) -> &[u8] {
-        &self.0[Self::TCP_HEADER_SIZE..]
     }
 
     pub fn raw(&self) -> &[u8] {
@@ -63,8 +57,6 @@ impl TcpPacket<'_> {
 
 pub struct WritableTcpPacket<'a>(&'a mut [u8]);
 impl WritableTcpPacket<'_> {
-    const TCP_HEADER_SIZE: usize = 20;
-
     pub fn header(&mut self) -> TcpHeader<&mut [u8]> {
         TcpHeader(self.0)
     }
@@ -84,8 +76,7 @@ impl WritableTcpPacket<'_> {
 fn tcp_new_connection(
     ip_packet: &IpV4Packet,
     packet: TcpPacket,
-    iface: &mut dyn TunInterface,
-    arp_cache: &ArpCache,
+    interface: &mut Interface,
 ) -> Result<()> {
     let daddr = Ipv4Addr::from(ip_packet.header().src_addr());
 
@@ -110,17 +101,42 @@ fn tcp_new_connection(
         ip_packet,
         response_packet.raw(),
         daddr,
-        arp_cache,
         IpProtocol::TCP,
-        iface,
+        interface,
     )
 }
 
-pub fn tcp_incoming(
-    ip_packet: IpV4Packet,
-    iface: &mut dyn TunInterface,
-    arp_cache: &ArpCache,
-) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Quad {
+    src: (Ipv4Addr, u32),
+    dst: (Ipv4Addr, u32),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConnState {
+    Listen,
+    SynSent,
+    SynRecvd,
+    Estabilished,
+    FinWait1,
+    FinWait2,
+    CloseWait,
+    Closing,
+    LastAck,
+    TimeWait,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Connection<'a> {
+    ip: IpV4Packet<'a>,
+    tcp: TcpPacket<'a>,
+    state: ConnState,
+    seq_number: u32,
+    ack_number: u32,
+}
+
+pub fn tcp_incoming(ip_packet: IpV4Packet, interface: &mut Interface) -> Result<()> {
     let tcp_packet = TcpPacket(ip_packet.data());
     let tcp_header = tcp_packet.header();
 
@@ -132,7 +148,7 @@ pub fn tcp_incoming(
     }
 
     if tcp_header.syn() && !tcp_header.ack() {
-        return tcp_new_connection(&ip_packet, tcp_packet, iface, arp_cache);
+        return tcp_new_connection(&ip_packet, tcp_packet, interface);
     }
 
     Ok(())
