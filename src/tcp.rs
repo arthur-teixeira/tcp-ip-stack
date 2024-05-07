@@ -114,31 +114,7 @@ fn tcp_new_connection<'a>(
     c.tcp.mut_header().set_ack(true);
     c.tcp.mut_header().set_syn(true);
 
-    let daddr = Ipv4Addr::from(c.ip.header().src_addr());
-
-    let mut response_buf = Vec::from(c.tcp.raw());
-    let mut response_packet = WritableTcpPacket(&mut response_buf);
-    let mut response_header = response_packet.header();
-
-    let src_port = response_header.dst_port();
-    response_header.set_dst_port(response_header.src_port());
-    response_header.set_src_port(src_port);
-
-    response_header.set_ack_number(c.recv.nxt);
-    response_header.set_sequence_number(c.send.nxt);
-
-    let checksum = response_packet.calculate_checksum(&c.ip);
-
-    let mut response_header = response_packet.header();
-    response_header.set_checksum(checksum);
-
-    ipv4_send(
-        &c.ip,
-        response_packet.raw(),
-        daddr,
-        IpProtocol::TCP,
-        interface,
-    )?;
+    c.send(interface)?;
 
     Ok(c)
 }
@@ -194,17 +170,17 @@ struct SendSequenceSpace {
 }
 
 /*
-    [RFC 793, Section 3.2, Figure 5]
+   [RFC 793, Section 3.2, Figure 5]
 
-                   1           2          3
-               ----------|----------|----------
-                      RCV.NXT    RCV.NXT
-                                +RCV.WND
+                  1           2          3
+              ----------|----------|----------
+                     RCV.NXT    RCV.NXT
+                               +RCV.WND
 
-    1 - old sequence numbers which have been acknowledged
-    2 - sequence numbers allowed for new reception
-    3 - future sequence numbers which are not yet allowed
- */
+   1 - old sequence numbers which have been acknowledged
+   2 - sequence numbers allowed for new reception
+   3 - future sequence numbers which are not yet allowed
+*/
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ReceiveSequenceSpace {
@@ -247,6 +223,34 @@ impl Connection {
                 Ok(())
             }
         }
+    }
+
+    fn send(&mut self, interface: &mut Interface) -> Result<()> {
+        let daddr = Ipv4Addr::from(self.ip.header().src_addr());
+
+        let mut response_buf = Vec::from(self.tcp.raw());
+        let mut response_packet = WritableTcpPacket(&mut response_buf);
+        let mut response_header = response_packet.header();
+
+        let src_port = response_header.dst_port();
+        response_header.set_dst_port(response_header.src_port());
+        response_header.set_src_port(src_port);
+
+        response_header.set_ack_number(self.recv.nxt);
+        response_header.set_sequence_number(self.send.nxt);
+
+        let checksum = response_packet.calculate_checksum(&self.ip);
+
+        let mut response_header = response_packet.header();
+        response_header.set_checksum(checksum);
+
+        ipv4_send(
+            &self.ip,
+            response_packet.raw(),
+            daddr,
+            IpProtocol::TCP,
+            interface,
+        )
     }
 }
 
