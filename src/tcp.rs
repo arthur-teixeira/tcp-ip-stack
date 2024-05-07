@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
     io::{Error, ErrorKind, Result},
     net::Ipv4Addr,
 };
@@ -33,18 +33,26 @@ bitfield! {
     pub u16, urgent_ptr, set_urgent_ptr: 159, 144;
 }
 
-pub type Connections<'a> = HashMap<Quad, Connection<'a>>;
+pub type Connections = HashMap<Quad, Connection>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TcpPacket<'a>(&'a [u8]);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TcpPacket(Vec<u8>);
 
-impl TcpPacket<'_> {
-    pub fn header(&self) -> TcpHeader<&[u8]> {
-        TcpHeader(self.0)
+impl TcpPacket {
+    pub fn header(&self) -> TcpHeader<&Vec<u8>> {
+        TcpHeader(&self.0)
+    }
+
+    pub fn mut_header(&mut self) -> TcpHeader<&mut Vec<u8>> {
+        TcpHeader(&mut self.0)
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.0[self.header().header_len() as usize..]
     }
 
     pub fn raw(&self) -> &[u8] {
-        self.0
+        &self.0
     }
 
     pub fn calculate_checksum(&self, packet: &IpV4Packet) -> u16 {
@@ -73,14 +81,42 @@ impl WritableTcpPacket<'_> {
     }
 }
 
-fn tcp_new_connection(
-    ip_packet: &IpV4Packet,
-    packet: TcpPacket,
+fn tcp_new_connection<'a>(
+    ip_packet: IpV4Packet,
+    tcp_packet: TcpPacket,
     interface: &mut Interface,
-) -> Result<()> {
-    let daddr = Ipv4Addr::from(ip_packet.header().src_addr());
+) -> Result<Connection> {
+    let tcph = tcp_packet.header();
 
-    let mut response_buf = Vec::from(packet.raw());
+    let iss = 0;
+    let wnd = 1024;
+    let mut c = Connection {
+        state: ConnState::SynRecvd,
+        send: SendSequenceSpace {
+            iss,
+            una: iss,
+            nxt: iss,
+            wnd,
+            up: false,
+            wl1: 0,
+            wl2: 0,
+        },
+        recv: ReceiveSequenceSpace {
+            irs: tcph.sequence_number(),
+            nxt: tcph.sequence_number() + 1,
+            wnd: tcph.window_size(),
+            up: false,
+        },
+        tcp: tcp_packet,
+        ip: ip_packet,
+    };
+
+    c.tcp.mut_header().set_ack(true);
+    c.tcp.mut_header().set_syn(true);
+
+    let daddr = Ipv4Addr::from(c.ip.header().src_addr());
+
+    let mut response_buf = Vec::from(c.tcp.raw());
     let mut response_packet = WritableTcpPacket(&mut response_buf);
     let mut response_header = response_packet.header();
 
@@ -88,35 +124,34 @@ fn tcp_new_connection(
     response_header.set_dst_port(response_header.src_port());
     response_header.set_src_port(src_port);
 
-    response_header.set_ack(true);
-    response_header.set_ack_number(packet.header().sequence_number() + 1);
-    response_header.set_sequence_number(101);
+    response_header.set_ack_number(c.recv.nxt);
+    response_header.set_sequence_number(c.send.nxt);
 
-    let checksum = response_packet.calculate_checksum(ip_packet);
+    let checksum = response_packet.calculate_checksum(&c.ip);
 
     let mut response_header = response_packet.header();
     response_header.set_checksum(checksum);
 
     ipv4_send(
-        ip_packet,
+        &c.ip,
         response_packet.raw(),
         daddr,
         IpProtocol::TCP,
         interface,
-    )
+    )?;
+
+    Ok(c)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Quad {
-    src: (Ipv4Addr, u32),
-    dst: (Ipv4Addr, u32),
+    src: (Ipv4Addr, u16),
+    dst: (Ipv4Addr, u16),
 }
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConnState {
-    Listen,
-    SynSent,
     SynRecvd,
     Estabilished,
     FinWait1,
@@ -127,17 +162,100 @@ pub enum ConnState {
     TimeWait,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Connection<'a> {
-    ip: IpV4Packet<'a>,
-    tcp: TcpPacket<'a>,
-    state: ConnState,
-    seq_number: u32,
-    ack_number: u32,
+/*
+    [RFC 793, Section 3.2, Figure 4]
+
+          1         2          3          4
+     ----------|----------|----------|----------
+            SND.UNA    SND.NXT    SND.UNA
+                                 +SND.WND
+
+   1 - old sequence numbers which have been acknowledged
+   2 - sequence numbers of unacknowledged data
+   3 - sequence numbers allowed for new data transmission
+   4 - future sequence numbers which are not yet allowed
+*/
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SendSequenceSpace {
+    // Send unacknowledged
+    una: u32,
+    // Send next
+    nxt: u32,
+    // Send window
+    wnd: u16,
+    // Send urgent pointer
+    up: bool,
+    // Segment sequence number used for last window update
+    wl1: usize,
+    // Segment ack number used for last window update
+    wl2: usize,
+    // Initial Send sequence number
+    iss: u32,
 }
 
-pub fn tcp_incoming(ip_packet: IpV4Packet, interface: &mut Interface) -> Result<()> {
-    let tcp_packet = TcpPacket(ip_packet.data());
+/*
+    [RFC 793, Section 3.2, Figure 5]
+
+                   1           2          3
+               ----------|----------|----------
+                      RCV.NXT    RCV.NXT
+                                +RCV.WND
+
+    1 - old sequence numbers which have been acknowledged
+    2 - sequence numbers allowed for new reception
+    3 - future sequence numbers which are not yet allowed
+ */
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ReceiveSequenceSpace {
+    // Receive next
+    nxt: u32,
+    // Receive window
+    wnd: u16,
+    // Receive urgent pointer
+    up: bool,
+    // Initial receive sequence number
+    irs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Connection {
+    ip: IpV4Packet,
+    tcp: TcpPacket,
+    state: ConnState,
+    send: SendSequenceSpace,
+    recv: ReceiveSequenceSpace,
+}
+
+impl Connection {
+    fn incoming_packet(
+        &mut self,
+        ip_packet: &IpV4Packet,
+        tcp_packet: &TcpPacket,
+        interface: &mut Interface,
+    ) -> Result<()> {
+        match self.state {
+            ConnState::SynRecvd => {
+                if tcp_packet.header().ack() {
+                    self.state = ConnState::Estabilished;
+                    eprintln!("Successfully estabilished connection");
+                }
+                Ok(())
+            }
+            _ => {
+                eprintln!("Got another packet: {:?}", tcp_packet.header());
+                Ok(())
+            }
+        }
+    }
+}
+
+pub fn tcp_incoming(
+    ip_packet: IpV4Packet,
+    interface: &mut Interface,
+    tcp_connections: &mut Connections,
+) -> Result<()> {
+    let tcp_packet = TcpPacket(ip_packet.data().into());
     let tcp_header = tcp_packet.header();
 
     if tcp_packet.calculate_checksum(&ip_packet) != tcp_header.checksum() {
@@ -147,9 +265,18 @@ pub fn tcp_incoming(ip_packet: IpV4Packet, interface: &mut Interface) -> Result<
         ));
     }
 
-    if tcp_header.syn() && !tcp_header.ack() {
-        return tcp_new_connection(&ip_packet, tcp_packet, interface);
-    }
+    let quad = Quad {
+        src: (ip_packet.header().src_addr().into(), tcp_header.src_port()),
+        dst: (ip_packet.header().dst_addr().into(), tcp_header.dst_port()),
+    };
 
-    Ok(())
+    match tcp_connections.entry(quad) {
+        Entry::Occupied(mut c) => c
+            .get_mut()
+            .incoming_packet(&ip_packet, &tcp_packet, interface),
+        Entry::Vacant(e) => {
+            e.insert(tcp_new_connection(ip_packet, tcp_packet, interface)?);
+            Ok(())
+        }
+    }
 }

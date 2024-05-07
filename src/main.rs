@@ -18,18 +18,17 @@ mod udp;
 mod utils;
 mod tcp;
 
-struct Interface<'a> {
+struct Interface {
     iface: Box<dyn TunInterface>,
     arp_cache: ArpCache,
-    tcp_connections: Connections<'a>,
 }
 
 fn main() -> Result<()> {
     let mut interface = Interface {
         iface: Box::new(Iface::without_packet_info("tap1", Mode::Tap)?),
         arp_cache: ArpCache::default(),
-        tcp_connections: Connections::default(),
     };
+    let mut tcp_connections= Connections::default();
 
     loop {
         let mut sock_buff = BufferView::from_iface(&mut *interface.iface)?;
@@ -44,7 +43,7 @@ fn main() -> Result<()> {
             }
             libc::ETH_P_IP => {
                 eprintln!("Receiving IP packet");
-                if let Err(e) = ipv4_recv(frame.payload, &mut interface) {
+                if let Err(e) = ipv4_recv(frame.payload, &mut interface, &mut tcp_connections) {
                     eprintln!("Error: {e}");
                 }
             }

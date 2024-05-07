@@ -6,6 +6,7 @@ use crate::arp::{ArpHwType, MAC_OCTETS};
 use crate::ethernet::Frame;
 use crate::{icmpv4, tcp, udp, Interface};
 use crate::utils::calculate_checksum;
+use crate::tcp::Connections;
 
 pub const IPV4: u8 = 0x04;
 pub const IP_TCP: u8 = 0x06;
@@ -40,20 +41,24 @@ bitfield! {
     pub u32, dst_addr, set_dst_addr: 159, 128;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct IpV4Packet<'a>(&'a [u8]);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IpV4Packet(Vec<u8>);
 
 pub struct WritableIpV4Packet<'a>(&'a mut [u8]);
 
-impl IpV4Packet<'_> {
+impl IpV4Packet {
     const IPV4_HEADER_SIZE: usize = 20;
 
     pub fn header(&self) -> IpV4Header<&[u8]> {
-        IpV4Header(self.0)
+        IpV4Header(&self.0)
     }
 
     pub fn data(&self) -> &[u8] {
         &self.0[Self::IPV4_HEADER_SIZE..]
+    }
+
+    pub fn raw(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -80,8 +85,9 @@ impl<'a> WritableIpV4Packet<'a> {
 pub fn ipv4_recv(
     frame_data: &[u8],
     interface: &mut Interface,
+    tcp_connections: &mut Connections,
 ) -> Result<()> {
-    let packet = IpV4Packet(frame_data);
+    let packet = IpV4Packet(frame_data.to_vec());
     let hdr = packet.header();
 
     if hdr.version() != 4 {
@@ -110,7 +116,7 @@ pub fn ipv4_recv(
         ICMPV4 => icmpv4::icmpv4_incoming(packet, interface),
         IP_TCP => {
             println!("Incoming TCP connection");
-            tcp::tcp_incoming(packet, interface)
+            tcp::tcp_incoming(packet, interface, tcp_connections)
         }
         IP_UDP => udp::udp_incoming(packet),
         _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol")),
