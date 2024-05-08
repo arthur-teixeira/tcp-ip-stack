@@ -327,6 +327,10 @@ impl Connection {
         // First, Check sequence number
         if !self.check_sequence_number(&tcp_packet) {
             eprintln!("Received Invalid segment");
+            if !tcp_packet.header().rst() {
+                self.tcp.mut_header().set_ack(true);
+                self.send(interface)?;
+            }
             return Ok(())
         }
 
