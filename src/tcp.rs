@@ -39,16 +39,14 @@ pub type Connections = HashMap<Quad, Connection>;
 pub struct TcpPacket(Vec<u8>);
 
 impl TcpPacket {
+    const TCP_HEADER_SIZE: usize = 20;
+
     pub fn header(&self) -> TcpHeader<&Vec<u8>> {
         TcpHeader(&self.0)
     }
 
     pub fn mut_header(&mut self) -> TcpHeader<&mut Vec<u8>> {
         TcpHeader(&mut self.0)
-    }
-
-    pub fn data(&self) -> &[u8] {
-        &self.0[self.header().header_len() as usize..]
     }
 
     pub fn raw(&self) -> &[u8] {
@@ -60,6 +58,68 @@ impl TcpPacket {
         let dst_ip = &packet.header().dst_addr().into();
 
         utils::ipv4_checksum(&self.0, 8, src_ip, dst_ip, IpProtocol::TCP as u8)
+    }
+
+    // Rfc 793, Page 18
+    pub fn maximum_segment_size(&self) -> Option<u16> {
+        let option_section = &self.0[Self::TCP_HEADER_SIZE..];
+
+        let mut state = 0;
+
+        let mut bs = [0; 2];
+
+        for byte in option_section {
+            match state {
+                // Looking for beggining of MSS section
+                0 => match byte {
+                    0 => return None, // End of Option list
+                    1 => continue,    // No-Op
+                    2 => state = 1,   // Beggining of MSS section
+                    _ => unreachable!(),
+                },
+
+                // Looking for length of MSS section
+                1 => match byte {
+                    4 => state = 2, // Length of MSS section
+                    _ => return None,
+                },
+
+                // Looking for first MSS byte
+                2 => {
+                    bs[0] = *byte;
+                    state = 3;
+                }
+                // Looking for second MSS byte
+                3 => {
+                    bs[1] = *byte;
+                    return Some(u16::from_be_bytes(bs));
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        None
+    }
+
+    pub fn data(&self) -> &[u8] {
+        let option_section = &self.0[Self::TCP_HEADER_SIZE..];
+        let mut end_of_option_section: isize = -1;
+
+        for (idx, byte) in option_section.iter().enumerate() {
+            match byte {
+                0 => {
+                    end_of_option_section = idx as isize;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        if end_of_option_section >= 0 {
+            &option_section[end_of_option_section as usize + 1..]
+        } else {
+            option_section
+        }
     }
 }
 
