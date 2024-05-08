@@ -145,8 +145,27 @@ fn tcp_new_connection<'a>(
     ip_packet: IpV4Packet,
     tcp_packet: TcpPacket,
     interface: &mut Interface,
-) -> Result<Connection> {
+) -> Result<Option<Connection>> {
     let tcph = tcp_packet.header();
+
+    if tcph.rst() {
+        /*
+        RFC793, "Segment Arrives"
+        If the state is LISTEN then
+        first check for an RST
+        An incoming RST should be ignored.  Return.
+        */
+        return Ok(None);
+    }
+
+    if tcph.ack() {
+        // TODO: Return an RST segment
+        return Ok(None);
+    }
+
+    if !tcph.syn() {
+        return Ok(None);
+    }
 
     let iss = 0;
     let wnd = 1024;
@@ -175,8 +194,9 @@ fn tcp_new_connection<'a>(
     c.tcp.mut_header().set_syn(true);
 
     c.send(interface)?;
+    c.send.nxt = c.send.nxt.wrapping_add(0);
 
-    Ok(c)
+    Ok(Some(c))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -188,6 +208,7 @@ pub struct Quad {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConnState {
+    Listen,
     SynRecvd,
     Estabilished,
     FinWait1,
@@ -264,17 +285,63 @@ pub struct Connection {
 }
 
 impl Connection {
+    // RFC 793, Section 3.3
+    fn check_sequence_number(&self, tcp_packet: &TcpPacket) -> bool {
+        let hdr = tcp_packet.header();
+        let seq = hdr.sequence_number();
+
+        let mut seg_len = tcp_packet.data().len() as u32;
+        seg_len += hdr.syn() as u32;
+        seg_len += hdr.fin() as u32;
+
+        let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
+
+        if seg_len == 0 {
+            if self.recv.wnd == 0 {
+                return self.recv.nxt == seq;
+            }
+
+            return is_between_wrapped(self.recv.nxt.wrapping_sub(1), seq, wend);
+        }
+
+        if self.recv.wnd == 0 {
+            return false;
+        }
+
+        is_between_wrapped(self.recv.nxt.wrapping_sub(1), seq, wend)
+            && is_between_wrapped(
+                self.recv.nxt.wrapping_sub(1),
+                seq.wrapping_add(seg_len - 1),
+                wend,
+            )
+    }
+
     fn incoming_packet(
         &mut self,
         ip_packet: &IpV4Packet,
         tcp_packet: &TcpPacket,
         interface: &mut Interface,
     ) -> Result<()> {
+        // RFC 793, "Segment Arrives", Otherwise section
+
+        // First, Check sequence number
+        if !self.check_sequence_number(&tcp_packet) {
+            eprintln!("Received Invalid segment");
+            return Ok(())
+        }
+
         match self.state {
             ConnState::SynRecvd => {
                 if tcp_packet.header().ack() {
                     self.state = ConnState::Estabilished;
                     eprintln!("Successfully estabilished connection");
+                }
+                Ok(())
+            }
+            ConnState::Estabilished => {
+                if tcp_packet.header().rst() {
+                    self.state = ConnState::Listen;
+                    eprintln!("Resetting connection");
                 }
                 Ok(())
             }
@@ -335,12 +402,26 @@ pub fn tcp_incoming(
     };
 
     match tcp_connections.entry(quad) {
-        Entry::Occupied(mut c) => c
-            .get_mut()
-            .incoming_packet(&ip_packet, &tcp_packet, interface),
+        Entry::Occupied(mut c) => {
+            c.get_mut()
+                .incoming_packet(&ip_packet, &tcp_packet, interface)?
+        }
         Entry::Vacant(e) => {
-            e.insert(tcp_new_connection(ip_packet, tcp_packet, interface)?);
-            Ok(())
+            if let Some(c) = tcp_new_connection(ip_packet, tcp_packet, interface)? {
+                e.insert(c);
+            }
         }
     }
+
+    tcp_connections.retain(|_, v| v.state != ConnState::Listen);
+
+    Ok(())
+}
+
+fn wrapping_lt(lhs: u32, rhs: u32) -> bool {
+    lhs.wrapping_sub(rhs) > (1 << 31)
+}
+
+fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {
+    wrapping_lt(start, x) && wrapping_lt(x, end)
 }
