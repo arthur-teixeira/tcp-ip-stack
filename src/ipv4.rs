@@ -42,7 +42,7 @@ bitfield! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct IpV4Packet(Vec<u8>);
+pub struct IpV4Packet(pub Vec<u8>);
 
 pub struct WritableIpV4Packet<'a>(&'a mut [u8]);
 
@@ -51,6 +51,10 @@ impl IpV4Packet {
 
     pub fn header(&self) -> IpV4Header<&[u8]> {
         IpV4Header(&self.0)
+    }
+
+    pub fn mut_header(&mut self) -> IpV4Header<&mut [u8]> {
+        IpV4Header(&mut self.0)
     }
 
     pub fn data(&self) -> &[u8] {

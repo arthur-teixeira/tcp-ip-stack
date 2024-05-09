@@ -17,6 +17,7 @@ mod ipv4;
 mod udp;
 mod utils;
 mod tcp;
+mod test_utils;
 
 struct Interface {
     iface: Box<dyn TunInterface>,

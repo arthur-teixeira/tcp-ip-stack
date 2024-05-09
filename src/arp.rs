@@ -220,53 +220,16 @@ pub fn arp_recv(
 
 #[cfg(test)]
 mod arp_test {
-    use std::{
-        fs::{self, File, OpenOptions},
-        io::Write,
-        os::unix::fs::FileExt,
+    use crate::{
+        ethernet::Frame,
+        test_utils::MockTun
     };
-
-    use crate::{ethernet::Frame, tcp::Connections};
 
     use super::*;
     const FRAME: &[u8] = &[
         0, 1, 8, 0, 6, 4, 0, 1, 42, 125, 214, 5, 152, 164, 192, 168, 100, 1, 0, 0, 0, 0, 0, 0, 10,
         0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-
-    struct MockTun {
-        pub file: File,
-        pub path: &'static str,
-    }
-
-    impl MockTun {
-        fn new(path: &'static str) -> Self {
-            Self {
-                file: OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open(path)
-                    .expect("Expected to open file"),
-                path,
-            }
-        }
-    }
-
-    impl Drop for MockTun {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(self.path);
-        }
-    }
-    impl TunInterface for MockTun {
-        fn rcv(&mut self, buf: &mut [u8]) -> Result<usize> {
-            self.file.read_at(buf, 0)
-        }
-
-        fn snd(&mut self, buf: &[u8]) -> Result<usize> {
-            self.file.write(buf)
-        }
-    }
 
     fn assert_eq_frame(actual: &Frame, expected: Frame) {
         assert_eq!(actual.ethertype, expected.ethertype);
@@ -290,7 +253,6 @@ mod arp_test {
         let mut interface = Interface {
             iface: Box::new(temp_file),
             arp_cache,
-            tcp_connections: Connections::default()
         };
 
         let snt = arp_recv(FRAME, &mut interface)

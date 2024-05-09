@@ -36,10 +36,10 @@ bitfield! {
 pub type Connections = HashMap<Quad, Connection>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TcpPacket(Vec<u8>);
+pub struct TcpPacket(pub Vec<u8>);
 
 impl TcpPacket {
-    const TCP_HEADER_SIZE: usize = 20;
+    pub const TCP_HEADER_SIZE: usize = 20;
 
     pub fn header(&self) -> TcpHeader<&Vec<u8>> {
         TcpHeader(&self.0)
@@ -51,6 +51,10 @@ impl TcpPacket {
 
     pub fn raw(&self) -> &[u8] {
         &self.0
+    }
+
+    pub fn mut_raw(&mut self) -> &mut [u8] {
+        &mut self.0
     }
 
     pub fn calculate_checksum(&self, packet: &IpV4Packet) -> u16 {
@@ -331,7 +335,7 @@ impl Connection {
                 self.tcp.mut_header().set_ack(true);
                 self.send(interface)?;
             }
-            return Ok(())
+            return Ok(());
         }
 
         match self.state {
@@ -428,4 +432,149 @@ fn wrapping_lt(lhs: u32, rhs: u32) -> bool {
 
 fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {
     wrapping_lt(start, x) && wrapping_lt(x, end)
+}
+
+#[cfg(test)]
+mod tcp_test {
+    use super::tcp_new_connection;
+    use crate::{
+        arp::{ArpCache, ArpIpv4},
+        tcp::{ConnState, ReceiveSequenceSpace, SendSequenceSpace, TcpPacket},
+        test_utils::{Ipv4PacketBuilder, MockTun, TcpPacketBuilder},
+        Interface,
+    };
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn test_new_connection() {
+        let iface = MockTun::new("/tmp/mock_tun");
+
+        let mut interface = Interface {
+            iface: Box::new(iface),
+            arp_cache: ArpCache::default(),
+        };
+
+        let ip_packet = Ipv4PacketBuilder::new()
+            .set_src_addr(Ipv4Addr::new(192, 168, 0, 1))
+            .set_dst_addr(Ipv4Addr::new(10, 0, 0, 7))
+            .build();
+
+        let cache_key = format!("{}-{}", 1, Ipv4Addr::from(ip_packet.header().src_addr()));
+
+        interface.arp_cache.insert(
+            cache_key,
+            ArpIpv4 {
+                smac: [1, 2, 3, 4, 5, 6],
+                sip: ip_packet.header().src_addr().into(),
+                dip: ip_packet.header().dst_addr().into(),
+                dmac: [7, 8, 9, 10, 11, 12],
+            },
+        );
+
+        let tcp_packet = TcpPacketBuilder::new()
+            .set_src_port(789)
+            .set_dst_port(678)
+            .set_rst(false)
+            .set_ack(false)
+            .set_syn(true)
+            .set_sequence_number(10)
+            .set_window_size(2)
+            .set_checksum(&ip_packet)
+            .build();
+
+        let conn = tcp_new_connection(ip_packet, tcp_packet.clone(), &mut interface)
+            .expect("Expected Ok")
+            .expect("Expected connection to be created");
+
+        assert_eq!(conn.state, ConnState::SynRecvd);
+        assert_eq!(
+            conn.recv,
+            ReceiveSequenceSpace {
+                irs: 10,
+                nxt: 11,
+                wnd: 2,
+                up: false,
+            }
+        );
+        assert_eq!(conn.send, SendSequenceSpace {
+            iss: 0,
+            una: 0,
+            nxt: 0,
+            wnd: 1024,
+            up: false,
+            wl1: 0,
+            wl2: 0,
+        });
+
+        let mut packet_sent = [0; 1500];
+        let _ = interface.iface.rcv(&mut packet_sent)
+            .expect("Expected packet to be sent");
+
+        let tcp = TcpPacket(packet_sent[34..].to_vec());
+        let tcph = tcp.header();
+
+
+        assert!(tcph.syn());
+        assert!(tcph.ack());
+    }
+
+    #[test]
+    fn test_new_connection_with_rst() {
+        let iface = MockTun::new("/tmp/mock_tun");
+
+        let mut interface = Interface {
+            iface: Box::new(iface),
+            arp_cache: ArpCache::default(),
+        };
+
+        let ip_packet = Ipv4PacketBuilder::new()
+            .set_src_addr(Ipv4Addr::new(192, 168, 0, 1))
+            .set_dst_addr(Ipv4Addr::new(10, 0, 0, 7))
+            .build();
+
+        let tcp_packet = TcpPacketBuilder::new()
+            .set_src_port(789)
+            .set_dst_port(678)
+            .set_rst(true)
+            .set_ack(false)
+            .set_syn(true)
+            .set_sequence_number(10)
+            .set_window_size(2)
+            .set_checksum(&ip_packet)
+            .build();
+
+        let conn = tcp_new_connection(ip_packet, tcp_packet, &mut interface)
+            .expect("Expected no errors");
+        assert_eq!(conn, None);
+    }
+
+    #[test]
+    fn test_new_connection_without_syn() {
+        let iface = MockTun::new("/tmp/mock_tun");
+
+        let mut interface = Interface {
+            iface: Box::new(iface),
+            arp_cache: ArpCache::default(),
+        };
+
+        let ip_packet = Ipv4PacketBuilder::new()
+            .set_src_addr(Ipv4Addr::new(192, 168, 0, 1))
+            .set_dst_addr(Ipv4Addr::new(10, 0, 0, 7))
+            .build();
+
+        let tcp_packet = TcpPacketBuilder::new()
+            .set_src_port(789)
+            .set_dst_port(678)
+            .set_rst(false)
+            .set_ack(false)
+            .set_syn(false)
+            .set_sequence_number(10)
+            .set_window_size(2)
+            .set_checksum(&ip_packet)
+            .build();
+
+        let conn = tcp_new_connection(ip_packet, tcp_packet, &mut interface)
+            .expect("Expected no errors");
+        assert_eq!(conn, None);
+    }
 }
