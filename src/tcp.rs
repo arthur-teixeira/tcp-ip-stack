@@ -178,7 +178,7 @@ fn tcp_new_connection<'a>(
         send: SendSequenceSpace {
             iss,
             una: iss,
-            nxt: iss,
+            nxt: iss + 1,
             wnd,
             up: false,
             wl1: 0,
@@ -186,7 +186,7 @@ fn tcp_new_connection<'a>(
         },
         recv: ReceiveSequenceSpace {
             irs: tcph.sequence_number(),
-            nxt: tcph.sequence_number() + 1,
+            nxt: tcph.sequence_number().wrapping_add(1),
             wnd: tcph.window_size(),
             up: false,
         },
@@ -199,6 +199,8 @@ fn tcp_new_connection<'a>(
 
     c.send(interface)?;
     c.send.nxt = c.send.nxt.wrapping_add(0);
+    c.tcp.mut_header().set_syn(false);
+    c.tcp.mut_header().set_rst(false);
 
     Ok(Some(c))
 }
@@ -212,6 +214,7 @@ pub struct Quad {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConnState {
+    Closed,
     Listen,
     SynRecvd,
     Estabilished,
@@ -221,6 +224,15 @@ pub enum ConnState {
     Closing,
     LastAck,
     TimeWait,
+}
+
+impl ConnState {
+    fn should_keep(&self) -> bool {
+        match self {
+            Self::Closed | Self::Listen => false,
+            _ => true,
+        }
+    }
 }
 
 /*
@@ -326,31 +338,164 @@ impl Connection {
         tcp_packet: &TcpPacket,
         interface: &mut Interface,
     ) -> Result<()> {
+        let tcph = tcp_packet.header();
+        eprintln!("HEADER: {:?}", tcph);
         // RFC 793, "Segment Arrives", Otherwise section
 
         // First, Check sequence number
         if !self.check_sequence_number(&tcp_packet) {
             eprintln!("Received Invalid segment");
-            if !tcp_packet.header().rst() {
+            if !tcph.rst() {
                 self.tcp.mut_header().set_ack(true);
                 self.send(interface)?;
             }
             return Ok(());
         }
 
+        // Second, check RST bit
+        if tcph.rst() {
+            match self.state {
+                ConnState::SynRecvd => {
+                    self.state = ConnState::Listen;
+                    eprintln!("Received RST, returning to listen state");
+                }
+                ConnState::Estabilished
+                | ConnState::FinWait1
+                | ConnState::FinWait2
+                | ConnState::CloseWait => {
+                    // If the RST bit is set then, any outstanding RECEIVEs and SEND
+                    // should receive "reset" responses.  All segment queues should be
+                    // flushed.  Users should also receive an unsolicited general
+                    // "connection reset" signal.  Enter the CLOSED state, delete the
+                    // TCB, and return.
+                    self.state = ConnState::Closed;
+                    eprintln!("Received RST, closing connection");
+                }
+                ConnState::Closing | ConnState::LastAck | ConnState::TimeWait => {
+                    // If the RST bit is set then, enter the CLOSED state, delete the
+                    // TCB, and return.
+
+                    self.state = ConnState::Closed;
+                    eprintln!("Closing connection");
+                }
+                ConnState::Closed | ConnState::Listen => unreachable!(),
+            }
+
+            return Ok(());
+        }
+
+        // TODO: Third, check security and precedence
+
+        // Fourth, Check the SYN bit
+        if tcph.syn() {
+            match self.state {
+                ConnState::SynRecvd
+                | ConnState::Estabilished
+                | ConnState::FinWait1
+                | ConnState::FinWait2
+                | ConnState::CloseWait
+                | ConnState::Closing
+                | ConnState::LastAck
+                | ConnState::TimeWait => {
+                    // If the SYN is in the window it is an error, send a reset, any
+                    // outstanding RECEIVEs and SEND should receive "reset" responses,
+                    // all segment queues should be flushed, the user should also
+                    // receive an unsolicited general "connection reset" signal, enter
+                    // the CLOSED state, delete the TCB, and return.
+                    self.send_rst(0, interface)?;
+                    self.state = ConnState::Closed;
+                }
+                ConnState::Closed | ConnState::Listen => unreachable!(),
+            }
+
+            return Ok(());
+        }
+
+        // Fifth, check the ACK bit
+        if !tcph.ack() {
+            return Ok(());
+        }
+
         match self.state {
             ConnState::SynRecvd => {
-                if tcp_packet.header().ack() {
+                // TODO: fix this
+                eprintln!("SND.UNA: {}, SEG.ACK: {}, SND.NXT: {}", self.send.una, tcph.ack_number(), self.send.nxt);
+                if is_between_wrapped(
+                    self.send.una.wrapping_sub(1),
+                    tcph.ack_number(),
+                    self.send.nxt.wrapping_add(1),
+                ) {
                     self.state = ConnState::Estabilished;
                     eprintln!("Successfully estabilished connection");
+                } else {
+                    eprintln!("Segment is not acceptable, sending RST");
+                    self.send_rst(tcph.ack_number(), interface)?;
                 }
+
                 Ok(())
             }
-            ConnState::Estabilished => {
-                if tcp_packet.header().rst() {
-                    self.state = ConnState::Listen;
-                    eprintln!("Resetting connection");
+            ConnState::Estabilished | ConnState::CloseWait => {
+                // If the ACK is a duplicate (SEG.ACK < SND.UNA), it can be ignored.
+                if wrapping_lt(tcph.ack_number(), self.send.una) {
+                    return Ok(());
                 }
+                if wrapping_lt(self.send.nxt, tcph.ack_number()) {
+                    // If the ACK acks something not yet sent (SEG.ACK > SND.NXT) then send an ACK,
+                    // drop the segment, and return.
+                    self.tcp.mut_header().set_ack(true);
+                    return self.send(interface);
+                }
+                // If SND.UNA < SEG.ACK =< SND.NXT then, set SND.UNA <- SEG.ACK.
+                // Any segments on the retransmission queue which are thereby
+                // entirely acknowledged are removed.  Users should receive
+                // positive acknowledgments for buffers which have been SENT and
+                // fully acknowledged (i.e., SEND buffer should be returned with
+                // "ok" response).
+                if is_between_wrapped(
+                    self.send.una,
+                    tcph.ack_number(),
+                    self.send.nxt.wrapping_add(1),
+                ) {
+                    self.send.una = tcph.ack_number();
+                    self.update_window(&tcph);
+                }
+
+                Ok(())
+            }
+            ConnState::FinWait1 => {
+                // TODO:
+                // In addition to the processing for the ESTABLISHED state, if
+                // our FIN is now acknowledged then enter FIN-WAIT-2 and continue
+                // processing in that state.
+                Ok(())
+            }
+            ConnState::FinWait2 => {
+                // TODO:
+                // In addition to the processing for the ESTABLISHED state, if
+                // the retransmission queue is empty, the user's CLOSE can be
+                // acknowledged ("ok") but do not delete the TCB.
+                Ok(())
+            }
+            ConnState::Closing => {
+                // TODO:
+                // In addition to the processing for the ESTABLISHED state, if
+                // the ACK acknowledges our FIN then enter the TIME-WAIT state,
+                // otherwise ignore the segment.
+                Ok(())
+            }
+            ConnState::LastAck => {
+                // TODO:
+                // The only thing that can arrive in this state is an
+                // acknowledgment of our FIN.  If our FIN is now acknowledged,
+                // delete the TCB, enter the CLOSED state, and return.
+                Ok(())
+            }
+
+            ConnState::TimeWait => {
+                // TODO:
+                // The only thing that can arrive in this state is a
+                // retransmission of the remote FIN.  Acknowledge it, and restart
+                // the 2 MSL timeout.
                 Ok(())
             }
             _ => {
@@ -358,6 +503,28 @@ impl Connection {
                 Ok(())
             }
         }
+    }
+
+    fn update_window(&mut self, tcph: &TcpHeader<&Vec<u8>>) {
+        // If SND.UNA < SEG.ACK =< SND.NXT, the send window should be
+        // updated.  If (SND.WL1 < SEG.SEQ or (SND.WL1 = SEG.SEQ and
+        // SND.WL2 =< SEG.ACK)), set SND.WND <- SEG.WND, set
+        // SND.WL1 <- SEG.SEQ, and set SND.WL2 <- SEG.ACK.
+        if wrapping_lt(self.send.wl1 as u32, tcph.sequence_number())
+            || (self.send.wl1 as u32 == tcph.sequence_number()
+                && self.send.wl2 as u32 <= tcph.ack_number())
+        {
+            self.send.wnd = tcph.window_size();
+            self.send.wl1 = tcph.sequence_number() as usize;
+            self.send.wl2 = tcph.ack_number() as usize;
+        }
+    }
+
+    fn send_rst(&mut self, seq: u32, interface: &mut Interface) -> Result<()> {
+        self.tcp.mut_header().set_rst(true);
+        self.tcp.mut_header().set_sequence_number(seq);
+        self.tcp.mut_header().set_ack_number(0);
+        self.send(interface)
     }
 
     fn send(&mut self, interface: &mut Interface) -> Result<()> {
@@ -421,7 +588,7 @@ pub fn tcp_incoming(
         }
     }
 
-    tcp_connections.retain(|_, v| v.state != ConnState::Listen);
+    tcp_connections.retain(|_, v| v.state.should_keep());
 
     Ok(())
 }
@@ -496,23 +663,27 @@ mod tcp_test {
                 up: false,
             }
         );
-        assert_eq!(conn.send, SendSequenceSpace {
-            iss: 0,
-            una: 0,
-            nxt: 0,
-            wnd: 1024,
-            up: false,
-            wl1: 0,
-            wl2: 0,
-        });
+        assert_eq!(
+            conn.send,
+            SendSequenceSpace {
+                iss: 0,
+                una: 0,
+                nxt: 0,
+                wnd: 1024,
+                up: false,
+                wl1: 0,
+                wl2: 0,
+            }
+        );
 
         let mut packet_sent = [0; 1500];
-        let _ = interface.iface.rcv(&mut packet_sent)
+        let _ = interface
+            .iface
+            .rcv(&mut packet_sent)
             .expect("Expected packet to be sent");
 
         let tcp = TcpPacket(packet_sent[34..].to_vec());
         let tcph = tcp.header();
-
 
         assert!(tcph.syn());
         assert!(tcph.ack());
@@ -543,8 +714,8 @@ mod tcp_test {
             .set_checksum(&ip_packet)
             .build();
 
-        let conn = tcp_new_connection(ip_packet, tcp_packet, &mut interface)
-            .expect("Expected no errors");
+        let conn =
+            tcp_new_connection(ip_packet, tcp_packet, &mut interface).expect("Expected no errors");
         assert_eq!(conn, None);
     }
 
@@ -573,8 +744,8 @@ mod tcp_test {
             .set_checksum(&ip_packet)
             .build();
 
-        let conn = tcp_new_connection(ip_packet, tcp_packet, &mut interface)
-            .expect("Expected no errors");
+        let conn =
+            tcp_new_connection(ip_packet, tcp_packet, &mut interface).expect("Expected no errors");
         assert_eq!(conn, None);
     }
 }

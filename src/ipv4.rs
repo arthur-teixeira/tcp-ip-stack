@@ -118,10 +118,7 @@ pub fn ipv4_recv(
 
     match hdr.proto() {
         ICMPV4 => icmpv4::icmpv4_incoming(packet, interface),
-        IP_TCP => {
-            println!("Incoming TCP connection");
-            tcp::tcp_incoming(packet, interface, tcp_connections)
-        }
+        IP_TCP => tcp::tcp_incoming(packet, interface, tcp_connections),
         IP_UDP => udp::udp_incoming(packet),
         _ => Err(Error::new(ErrorKind::Unsupported, "Unsupported protocol")),
     }
