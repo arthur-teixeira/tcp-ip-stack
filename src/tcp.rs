@@ -198,7 +198,7 @@ fn tcp_new_connection<'a>(
     c.tcp.mut_header().set_syn(true);
 
     c.send(interface)?;
-    c.send.nxt = c.send.nxt.wrapping_add(0);
+    c.send.nxt = c.send.nxt.wrapping_add(1);
     c.tcp.mut_header().set_syn(false);
     c.tcp.mut_header().set_rst(false);
 
@@ -339,7 +339,6 @@ impl Connection {
         interface: &mut Interface,
     ) -> Result<()> {
         let tcph = tcp_packet.header();
-        eprintln!("HEADER: {:?}", tcph);
         // RFC 793, "Segment Arrives", Otherwise section
 
         // First, Check sequence number
@@ -418,8 +417,6 @@ impl Connection {
 
         match self.state {
             ConnState::SynRecvd => {
-                // TODO: fix this
-                eprintln!("SND.UNA: {}, SEG.ACK: {}, SND.NXT: {}", self.send.una, tcph.ack_number(), self.send.nxt);
                 if is_between_wrapped(
                     self.send.una.wrapping_sub(1),
                     tcph.ack_number(),
@@ -430,6 +427,7 @@ impl Connection {
                 } else {
                     eprintln!("Segment is not acceptable, sending RST");
                     self.send_rst(tcph.ack_number(), interface)?;
+                    self.state = ConnState::Listen;
                 }
 
                 Ok(())
