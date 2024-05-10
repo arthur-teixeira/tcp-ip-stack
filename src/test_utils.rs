@@ -1,3 +1,6 @@
+#![cfg(test)]
+#![allow(dead_code)]
+
 use std::{
     fs::{self, File, OpenOptions},
     io::{Result, Write},
@@ -5,7 +8,7 @@ use std::{
     os::unix::fs::FileExt,
 };
 
-use crate::{arp::TunInterface, ipv4::IpV4Packet, tcp::TcpPacket, utils};
+use crate::{arp::TunInterface, ipv4::IpV4Packet, tcp::TcpPacket, utils, WritableIpV4Packet};
 
 pub struct TcpPacketBuilder {
     packet: TcpPacket,

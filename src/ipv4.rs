@@ -44,8 +44,6 @@ bitfield! {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IpV4Packet(pub Vec<u8>);
 
-pub struct WritableIpV4Packet<'a>(&'a mut [u8]);
-
 impl IpV4Packet {
     const IPV4_HEADER_SIZE: usize = 20;
 
@@ -57,24 +55,13 @@ impl IpV4Packet {
         IpV4Header(&mut self.0)
     }
 
+    pub fn mut_data(&mut self) -> &mut [u8] {
+        &mut self.0[Self::IPV4_HEADER_SIZE..]
+    }
+
     pub fn data(&self) -> &[u8] {
         &self.0[Self::IPV4_HEADER_SIZE..]
-    }
 
-    pub fn raw(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl<'a> WritableIpV4Packet<'a> {
-    const IPV4_HEADER_SIZE: usize = 20;
-
-    pub fn header(&mut self) -> IpV4Header<&mut [u8]> {
-        IpV4Header(self.0)
-    }
-
-    pub fn data(&mut self) -> &mut [u8] {
-        &mut self.0[Self::IPV4_HEADER_SIZE..]
     }
 
     pub fn raw_header(&self) -> &[u8] {
@@ -82,7 +69,11 @@ impl<'a> WritableIpV4Packet<'a> {
     }
 
     pub fn set_data(&mut self, data: &[u8]) {
-        self.data().copy_from_slice(data)
+        self.mut_data().copy_from_slice(data);
+    }
+
+    pub fn raw(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -132,9 +123,8 @@ pub fn ipv4_send(
     interface: &mut Interface,
 ) -> Result<()> {
     let len: u16 = data.len() as u16 + 20;
-    let mut response_buffer = vec![0; len as usize];
-    let mut response_packet = WritableIpV4Packet(&mut response_buffer);
-    let mut hdr = response_packet.header();
+    let mut response_packet = IpV4Packet(vec![0; len as usize]);
+    let mut hdr = response_packet.mut_header();
     hdr.set_version(IPV4);
     hdr.set_ihl(0x05);
     hdr.set_tos(0);
@@ -152,7 +142,7 @@ pub fn ipv4_send(
 
     let csum = calculate_checksum(response_packet.raw_header(), 5);
 
-    let mut hdr = response_packet.header();
+    let mut hdr = response_packet.mut_header();
     hdr.set_checksum(csum);
 
     let k = format!("{}-{}", ArpHwType::Ethernet.to_u16(), daddr);
@@ -172,7 +162,7 @@ pub fn ipv4_send(
         smac: MAC_OCTETS,
         dmac: arp_entry.smac,
         ethertype: libc::ETH_P_IP as u16,
-        payload: &response_buffer,
+        payload: response_packet.raw(),
     };
 
     let response = &frame.to_buffer();
