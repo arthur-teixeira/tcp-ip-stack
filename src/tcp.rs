@@ -129,24 +129,6 @@ impl TcpPacket {
     }
 }
 
-pub struct WritableTcpPacket<'a>(&'a mut [u8]);
-impl WritableTcpPacket<'_> {
-    pub fn header(&mut self) -> TcpHeader<&mut [u8]> {
-        TcpHeader(self.0)
-    }
-
-    pub fn raw(&mut self) -> &mut [u8] {
-        self.0
-    }
-
-    pub fn calculate_checksum(&self, packet: &IpV4Packet) -> u16 {
-        let src_ip = &packet.header().src_addr().into();
-        let dst_ip = &packet.header().dst_addr().into();
-
-        utils::ipv4_checksum(&self.0, 8, src_ip, dst_ip, IpProtocol::TCP as u8)
-    }
-}
-
 fn tcp_new_connection<'a>(
     ip_packet: IpV4Packet,
     tcp_packet: TcpPacket,
@@ -207,8 +189,7 @@ fn tcp_new_connection<'a>(
     c.tcp.mut_header().set_ack(true);
     c.tcp.mut_header().set_syn(true);
 
-    c.send(interface)?;
-    c.send.nxt = c.send.nxt.wrapping_add(1);
+    c.send(c.send.nxt, interface)?;
     c.tcp.mut_header().set_syn(false);
     c.tcp.mut_header().set_rst(false);
 
@@ -357,7 +338,6 @@ impl Connection {
 
     fn incoming_packet(
         &mut self,
-        ip_packet: &IpV4Packet,
         tcp_packet: &TcpPacket,
         interface: &mut Interface,
     ) -> Result<()> {
@@ -369,7 +349,7 @@ impl Connection {
             eprintln!("Received Invalid segment");
             if !tcph.rst() {
                 self.tcp.mut_header().set_ack(true);
-                self.send(interface)?;
+                self.send(self.send.nxt, interface)?;
             }
             return Ok(());
         }
@@ -464,7 +444,7 @@ impl Connection {
                 // If the ACK acks something not yet sent (SEG.ACK > SND.NXT) then send an ACK,
                 // drop the segment, and return.
                 self.tcp.mut_header().set_ack(true);
-                return self.send(interface);
+                return self.send(self.send.nxt, interface);
             }
             // If SND.UNA < SEG.ACK =< SND.NXT then, set SND.UNA <- SEG.ACK.
             // Any segments on the retransmission queue which are thereby
@@ -578,7 +558,7 @@ impl Connection {
                 self.recv.nxt = tcph.sequence_number().wrapping_add(data.len() as u32);
 
                 // Acknowledgement: <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
-                self.send(interface)?;
+                self.send(self.send.nxt, interface)?;
             }
         }
 
@@ -623,30 +603,42 @@ impl Connection {
 
     fn send_rst(&mut self, seq: u32, interface: &mut Interface) -> Result<()> {
         self.tcp.mut_header().set_rst(true);
-        self.tcp.mut_header().set_sequence_number(seq);
         self.tcp.mut_header().set_ack_number(0);
-        self.send(interface)
+        self.send(seq, interface)
     }
 
     // TODO: Process timers, update sequence spaces
-    fn send(&mut self, interface: &mut Interface) -> Result<()> {
+    fn send(&mut self, seq: u32, interface: &mut Interface) -> Result<()> {
         let daddr = Ipv4Addr::from(self.ip.header().src_addr());
 
-        let mut response_buf = Vec::from(self.tcp.raw());
-        let mut response_packet = WritableTcpPacket(&mut response_buf);
-        let mut response_header = response_packet.header();
+        let response_buf = Vec::from(self.tcp.raw());
+        let mut response_packet = TcpPacket(response_buf);
+        let mut response_header = response_packet.mut_header();
 
         let src_port = response_header.dst_port();
         response_header.set_dst_port(response_header.src_port());
         response_header.set_src_port(src_port);
 
         response_header.set_ack_number(self.recv.nxt);
-        response_header.set_sequence_number(self.send.nxt);
+        response_header.set_sequence_number(seq);
 
         let checksum = response_packet.calculate_checksum(&self.ip);
 
-        let mut response_header = response_packet.header();
+        let mut response_header = response_packet.mut_header();
         response_header.set_checksum(checksum);
+
+        let mut next_seq = seq.wrapping_add(response_packet.data().len() as u32);
+        if self.tcp.header().syn() {
+            next_seq = next_seq.wrapping_add(1);
+            self.tcp.mut_header().set_syn(false);
+        }
+        if self.tcp.header().fin() {
+            next_seq = next_seq.wrapping_add(1);
+            self.tcp.mut_header().set_fin(false);
+        }
+        if wrapping_lt(self.send.nxt, next_seq) {
+            self.send.nxt = next_seq;
+        }
 
         self.timers.send_times.insert(self.send.nxt, time::Instant::now());
         ipv4_send(
@@ -682,7 +674,7 @@ pub fn tcp_incoming(
     match tcp_connections.entry(quad) {
         Entry::Occupied(mut c) => {
             c.get_mut()
-                .incoming_packet(&ip_packet, &tcp_packet, interface)?
+                .incoming_packet(&tcp_packet, interface)?
         }
         Entry::Vacant(e) => {
             if let Some(c) = tcp_new_connection(ip_packet, tcp_packet, interface)? {
@@ -752,7 +744,7 @@ mod tcp_test {
             .set_checksum(&ip_packet)
             .build();
 
-        let conn = tcp_new_connection(ip_packet, tcp_packet.clone(), &mut interface)
+        let conn = tcp_new_connection(ip_packet, tcp_packet, &mut interface)
             .expect("Expected Ok")
             .expect("Expected connection to be created");
 

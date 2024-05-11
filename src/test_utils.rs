@@ -8,7 +8,7 @@ use std::{
     os::unix::fs::FileExt,
 };
 
-use crate::{arp::TunInterface, ipv4::IpV4Packet, tcp::TcpPacket, utils, WritableIpV4Packet};
+use crate::{arp::TunInterface, ipv4::IpV4Packet, tcp::TcpPacket, utils};
 
 pub struct TcpPacketBuilder {
     packet: TcpPacket,
@@ -17,7 +17,7 @@ pub struct TcpPacketBuilder {
 impl TcpPacketBuilder {
     pub fn new() -> Self {
         Self {
-            packet: TcpPacket(vec![0; 1500]),
+            packet: TcpPacket(vec![0; 20]),
         }
     }
 
