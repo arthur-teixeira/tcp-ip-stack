@@ -66,66 +66,9 @@ impl TcpPacket {
         utils::ipv4_checksum(&self.0, 8, src_ip, dst_ip, IpProtocol::TCP as u8)
     }
 
-    // Rfc 793, Page 18
-    pub fn maximum_segment_size(&self) -> Option<u16> {
-        let option_section = &self.0[Self::TCP_HEADER_SIZE..];
-
-        let mut state = 0;
-
-        let mut bs = [0; 2];
-
-        for byte in option_section {
-            match state {
-                // Looking for beggining of MSS section
-                0 => match byte {
-                    0 => return None, // End of Option list
-                    1 => continue,    // No-Op
-                    2 => state = 1,   // Beggining of MSS section
-                    _ => unreachable!(),
-                },
-
-                // Looking for length of MSS section
-                1 => match byte {
-                    4 => state = 2, // Length of MSS section
-                    _ => return None,
-                },
-
-                // Looking for first MSS byte
-                2 => {
-                    bs[0] = *byte;
-                    state = 3;
-                }
-                // Looking for second MSS byte
-                3 => {
-                    bs[1] = *byte;
-                    return Some(u16::from_be_bytes(bs));
-                }
-                _ => unreachable!(),
-            }
-        }
-
-        None
-    }
-
     pub fn data(&self) -> &[u8] {
-        let option_section = &self.0[Self::TCP_HEADER_SIZE..];
-        let mut end_of_option_section: isize = -1;
-
-        for (idx, byte) in option_section.iter().enumerate() {
-            match byte {
-                0 => {
-                    end_of_option_section = idx as isize;
-                    break;
-                }
-                _ => continue,
-            }
-        }
-
-        if end_of_option_section >= 0 {
-            &option_section[end_of_option_section as usize + 1..]
-        } else {
-            option_section
-        }
+        let data_offset = self.header().header_len() * 4;
+        &self.0[data_offset as usize..]
     }
 }
 
@@ -336,11 +279,7 @@ impl Connection {
             )
     }
 
-    fn incoming_packet(
-        &mut self,
-        tcp_packet: &TcpPacket,
-        interface: &mut Interface,
-    ) -> Result<()> {
+    fn incoming_packet(&mut self, tcp_packet: &TcpPacket, interface: &mut Interface) -> Result<()> {
         let tcph = tcp_packet.header();
         // RFC 793, "Segment Arrives", Otherwise section
 
@@ -489,8 +428,6 @@ impl Connection {
                 self.send.una = tcph.ack_number();
                 self.update_window(&tcph);
             }
-
-            return Ok(());
         }
 
         match self.state {
@@ -537,7 +474,6 @@ impl Connection {
         }
 
         let data = tcp_packet.data();
-
         // Seventh, process the segment text
         if !data.is_empty() {
             if let ConnState::Estabilished | ConnState::FinWait1 | ConnState::FinWait2 = self.state
@@ -550,6 +486,8 @@ impl Connection {
                     unread_data_at = 0;
                 }
                 self.incoming.extend(&data[unread_data_at..]);
+
+                eprintln!("Got data: {:?}", self.incoming);
 
                 // Once the TCP takes responsibility for the data it advances
                 // RCV.NXT over the data accepted, and adjusts RCV.WND as
@@ -564,6 +502,12 @@ impl Connection {
 
         // Eight, check FIN bit
         if tcph.fin() {
+            // TODO:
+            // If the FIN bit is set, signal the user "connection closing" and
+            // return any pending RECEIVEs with same message, advance RCV.NXT
+            // over the FIN, and send an acknowledgment for the FIN.  Note that
+            // FIN implies PUSH for any segment text not yet delivered to the
+            // user.
             match self.state {
                 ConnState::SynRecvd | ConnState::Estabilished => {
                     eprintln!("FIN Received, closing connection");
@@ -640,7 +584,9 @@ impl Connection {
             self.send.nxt = next_seq;
         }
 
-        self.timers.send_times.insert(self.send.nxt, time::Instant::now());
+        self.timers
+            .send_times
+            .insert(self.send.nxt, time::Instant::now());
         ipv4_send(
             &self.ip,
             response_packet.raw(),
@@ -672,10 +618,7 @@ pub fn tcp_incoming(
     };
 
     match tcp_connections.entry(quad) {
-        Entry::Occupied(mut c) => {
-            c.get_mut()
-                .incoming_packet(&tcp_packet, interface)?
-        }
+        Entry::Occupied(mut c) => c.get_mut().incoming_packet(&tcp_packet, interface)?,
         Entry::Vacant(e) => {
             if let Some(c) = tcp_new_connection(ip_packet, tcp_packet, interface)? {
                 e.insert(c);
