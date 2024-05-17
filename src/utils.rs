@@ -34,7 +34,7 @@ pub fn calculate_checksum(data: &[u8], skipword: usize) -> u16 {
         return 0;
     }
 
-    let mut sum = sum_words(data, skipword);
+    let sum = sum_words(data, skipword);
 
     finalize_checksum(sum)
 }

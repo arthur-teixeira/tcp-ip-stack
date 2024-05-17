@@ -30,7 +30,7 @@ impl BufferView {
         val
     }
 
-    pub fn from_iface(f: &mut dyn TunInterface) -> Result<Self> {
+    pub fn from_iface(f: &mut impl TunInterface) -> Result<Self> {
         let mut buffer = [0; 1500];
         let nb = f.rcv(&mut buffer)?;
         Ok(Self {

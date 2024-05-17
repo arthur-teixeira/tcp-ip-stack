@@ -2,7 +2,7 @@ use bitfield::bitfield;
 use std::io::{Error, ErrorKind, Result};
 use std::net::Ipv4Addr;
 
-use crate::arp::{ArpHwType, MAC_OCTETS};
+use crate::arp::{ArpHwType, TunInterface, MAC_OCTETS};
 use crate::ethernet::Frame;
 use crate::{icmpv4, tcp, udp, Interface};
 use crate::utils::calculate_checksum;
@@ -77,9 +77,9 @@ impl IpV4Packet {
     }
 }
 
-pub fn ipv4_recv(
+pub fn ipv4_recv<T: TunInterface>(
     frame_data: &[u8],
-    interface: &mut Interface,
+    interface: &mut Interface<T>,
     tcp_connections: &mut Connections,
 ) -> Result<()> {
     let packet = IpV4Packet(frame_data.to_vec());
@@ -115,12 +115,12 @@ pub fn ipv4_recv(
     }
 }
 
-pub fn ipv4_send(
+pub fn ipv4_send<T: TunInterface>(
     request: &IpV4Packet,
     data: &[u8],
     daddr: Ipv4Addr,
     protocol: IpProtocol,
-    interface: &mut Interface,
+    interface: &mut Interface<T>,
 ) -> Result<()> {
     let len: u16 = data.len() as u16 + 20;
     let mut response_packet = IpV4Packet(vec![0; len as usize]);

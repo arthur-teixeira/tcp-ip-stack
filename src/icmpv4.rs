@@ -1,6 +1,6 @@
 use crate::{
-    buf_writer::BufWriter, ipv4_send, utils::calculate_checksum, BufferView, Interface, IpProtocol,
-    IpV4Packet,
+    arp::TunInterface, buf_writer::BufWriter, ipv4_send, utils::calculate_checksum, BufferView,
+    Interface, IpProtocol, IpV4Packet,
 };
 use std::{
     io::{Error, ErrorKind, Result},
@@ -118,10 +118,10 @@ impl<'a> IcmpV4Message<'a> {
     }
 }
 
-fn icmpv4_reply(
+fn icmpv4_reply<T: TunInterface>(
     ip_packet: IpV4Packet,
     mut icmp_hdr: IcmpV4Header,
-    interface: &mut Interface,
+    interface: &mut Interface<T>,
 ) -> Result<()> {
     icmp_hdr.message_type = IcmpV4MessageType::EchoReply;
     icmp_hdr.csum = 0;
@@ -138,7 +138,7 @@ fn icmpv4_reply(
     )
 }
 
-pub fn icmpv4_incoming(ip_packet: IpV4Packet, interface: &mut Interface) -> Result<()> {
+pub fn icmpv4_incoming<T: TunInterface>(ip_packet: IpV4Packet, interface: &mut Interface<T>) -> Result<()> {
     let ip_data = ip_packet.data();
     let mut buf_view = BufferView::from_slice(ip_data)?;
     let icmp_hdr = IcmpV4Header::from_buffer(&mut buf_view)?;

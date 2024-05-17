@@ -160,10 +160,10 @@ unsafe fn struct_to_bytes<T: Sized>(p: &T) -> &[u8] {
     core::slice::from_raw_parts((p as *const T) as *const u8, core::mem::size_of::<T>())
 }
 
-fn arp_reply(
+fn arp_reply<T: TunInterface>(
     mut header: ArpHeader,
     packet: &ArpIpv4,
-    interface: &mut Interface,
+    interface: &mut Interface<T>,
 ) -> Result<usize> {
     let response_packet = ArpIpv4 {
         dip: packet.sip,
@@ -186,9 +186,9 @@ fn arp_reply(
     interface.iface.snd(&ether_buf)
 }
 
-pub fn arp_recv(
+pub fn arp_recv<T: TunInterface>(
     frame_data: &[u8],
-    interface: &mut Interface,
+    interface: &mut Interface<T>,
 ) -> Result<usize> {
     let arp_hdr = ArpHeader::from_bytes(frame_data)?;
     let arp_ipv4 = ArpIpv4::from_header(&arp_hdr)?;
@@ -251,7 +251,7 @@ mod arp_test {
         let arp_cache = ArpCache::new();
 
         let mut interface = Interface {
-            iface: Box::new(temp_file),
+            iface: temp_file,
             arp_cache,
         };
 

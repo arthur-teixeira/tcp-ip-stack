@@ -19,31 +19,29 @@ mod utils;
 mod tcp;
 mod test_utils;
 
-struct Interface {
-    iface: Box<dyn TunInterface>,
+struct Interface<T: TunInterface> {
+    iface: T,
     arp_cache: ArpCache,
 }
 
 fn main() -> Result<()> {
     let mut interface = Interface {
-        iface: Box::new(Iface::without_packet_info("tap1", Mode::Tap)?),
+        iface: Iface::without_packet_info("tap1", Mode::Tap)?,
         arp_cache: ArpCache::default(),
     };
     let mut tcp_connections= Connections::default();
 
     loop {
-        let mut sock_buff = BufferView::from_iface(&mut *interface.iface)?;
+        let mut sock_buff = BufferView::from_iface(&mut interface.iface)?;
         let frame = Frame::from_buffer(&mut sock_buff);
 
         match frame.ethertype as c_int {
             libc::ETH_P_ARP => {
-                eprintln!("Receiving ARP packet");
                 if let Err(e) = arp_recv(frame.payload, &mut interface) {
                     eprintln!("Error: {e}");
                 }
             }
             libc::ETH_P_IP => {
-                eprintln!("Receiving IP packet");
                 if let Err(e) = ipv4_recv(frame.payload, &mut interface, &mut tcp_connections) {
                     eprintln!("Error: {e}");
                 }

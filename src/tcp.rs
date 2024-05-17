@@ -1,11 +1,11 @@
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, VecDeque},
-    io::{Error, ErrorKind, Result},
+    io::{Error, ErrorKind, Read, Result},
     net::Ipv4Addr,
     time,
 };
 
-use crate::{ipv4_send, utils, Interface, IpProtocol, IpV4Packet};
+use crate::{arp::TunInterface, ipv4_send, utils, Interface, IpProtocol, IpV4Packet};
 
 use bitfield::bitfield;
 
@@ -72,10 +72,10 @@ impl TcpPacket {
     }
 }
 
-fn tcp_new_connection<'a>(
+fn tcp_new_connection<'a, T: TunInterface>(
     ip_packet: IpV4Packet,
     tcp_packet: TcpPacket,
-    interface: &mut Interface,
+    interface: &mut Interface<T>,
 ) -> Result<Option<Connection>> {
     let tcph = tcp_packet.header();
 
@@ -279,7 +279,11 @@ impl Connection {
             )
     }
 
-    fn incoming_packet(&mut self, tcp_packet: &TcpPacket, interface: &mut Interface) -> Result<()> {
+    fn incoming_packet<T: TunInterface>(
+        &mut self,
+        tcp_packet: &TcpPacket,
+        interface: &mut Interface<T>,
+    ) -> Result<()> {
         let tcph = tcp_packet.header();
         // RFC 793, "Segment Arrives", Otherwise section
 
@@ -487,8 +491,6 @@ impl Connection {
                 }
                 self.incoming.extend(&data[unread_data_at..]);
 
-                eprintln!("Got data: {:?}", self.incoming);
-
                 // Once the TCP takes responsibility for the data it advances
                 // RCV.NXT over the data accepted, and adjusts RCV.WND as
                 // apporopriate to the current buffer availability.  The total of
@@ -502,15 +504,19 @@ impl Connection {
 
         // Eight, check FIN bit
         if tcph.fin() {
-            // TODO:
             // If the FIN bit is set, signal the user "connection closing" and
             // return any pending RECEIVEs with same message, advance RCV.NXT
             // over the FIN, and send an acknowledgment for the FIN.  Note that
             // FIN implies PUSH for any segment text not yet delivered to the
             // user.
+            self.recv.nxt = self.recv.nxt.wrapping_add(1);
+            self.send(self.send.nxt, interface)?;
             match self.state {
                 ConnState::SynRecvd | ConnState::Estabilished => {
                     eprintln!("FIN Received, closing connection");
+                    let mut str = String::new();
+                    self.incoming.read_to_string(&mut str)?;
+                    eprintln!("Data: {}", str);
                     self.state = ConnState::CloseWait;
                 }
                 ConnState::CloseWait | ConnState::Closing | ConnState::LastAck => {}
@@ -545,14 +551,14 @@ impl Connection {
         }
     }
 
-    fn send_rst(&mut self, seq: u32, interface: &mut Interface) -> Result<()> {
+    fn send_rst<T: TunInterface>(&mut self, seq: u32, interface: &mut Interface<T>) -> Result<()> {
         self.tcp.mut_header().set_rst(true);
         self.tcp.mut_header().set_ack_number(0);
         self.send(seq, interface)
     }
 
     // TODO: Process timers, update sequence spaces
-    fn send(&mut self, seq: u32, interface: &mut Interface) -> Result<()> {
+    fn send<T: TunInterface>(&mut self, seq: u32, interface: &mut Interface<T>) -> Result<()> {
         let daddr = Ipv4Addr::from(self.ip.header().src_addr());
 
         let response_buf = Vec::from(self.tcp.raw());
@@ -597,9 +603,9 @@ impl Connection {
     }
 }
 
-pub fn tcp_incoming(
+pub fn tcp_incoming<T: TunInterface>(
     ip_packet: IpV4Packet,
-    interface: &mut Interface,
+    interface: &mut Interface<T>,
     tcp_connections: &mut Connections,
 ) -> Result<()> {
     let tcp_packet = TcpPacket(ip_packet.data().into());
@@ -643,7 +649,7 @@ fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {
 mod tcp_test {
     use super::tcp_new_connection;
     use crate::{
-        arp::{ArpCache, ArpIpv4},
+        arp::{TunInterface, ArpCache, ArpIpv4},
         tcp::{ConnState, ReceiveSequenceSpace, SendSequenceSpace, TcpPacket},
         test_utils::{Ipv4PacketBuilder, MockTun, TcpPacketBuilder},
         Interface,
@@ -655,7 +661,7 @@ mod tcp_test {
         let iface = MockTun::new("/tmp/mock_tun");
 
         let mut interface = Interface {
-            iface: Box::new(iface),
+            iface,
             arp_cache: ArpCache::default(),
         };
 
@@ -732,7 +738,7 @@ mod tcp_test {
         let iface = MockTun::new("/tmp/mock_tun");
 
         let mut interface = Interface {
-            iface: Box::new(iface),
+            iface,
             arp_cache: ArpCache::default(),
         };
 
@@ -762,7 +768,7 @@ mod tcp_test {
         let iface = MockTun::new("/tmp/mock_tun");
 
         let mut interface = Interface {
-            iface: Box::new(iface),
+            iface,
             arp_cache: ArpCache::default(),
         };
 
