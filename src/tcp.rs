@@ -1,5 +1,9 @@
 use std::{
-    collections::{hash_map::Entry, BTreeMap, HashMap, VecDeque}, fs::OpenOptions, io::{Error, ErrorKind, Read, Result, Write}, net::Ipv4Addr, time
+    collections::{hash_map::Entry, BTreeMap, HashMap, VecDeque},
+    fs::OpenOptions,
+    io::{Error, ErrorKind, Read, Result, Write},
+    net::Ipv4Addr,
+    time,
 };
 
 use crate::{arp::TunInterface, ipv4_send, utils, Interface, IpProtocol, IpV4Packet};
@@ -479,19 +483,23 @@ impl Connection {
                 }
                 self.incoming.extend(&data[unread_data_at..]);
 
-                // TODO: handle out-of-order packets. The way it works right now
-                // acknowledges all previous sequence numbers along with the current.
-                // This way, if we receive an out-of-order packet, it acknowledges
-                // previous packets that have not been received yet, and we lose data.
+                // RFC 5681: A TCP receiver SHOULD send an immediate duplicate ACK when an out-
+                // of-order segment arrives.  The purpose of this ACK is to inform the
+                // sender that a segment was received out-of-order and which sequence
+                // number is expected.
+                if tcph.sequence_number() > self.recv.nxt {
+                    self.send(self.send.nxt, interface)?;
+                } else {
+                    // Once the TCP takes responsibility for the data it advances
+                    // RCV.NXT over the data accepted, and adjusts RCV.WND as
+                    // apporopriate to the current buffer availability.  The total of
+                    // RCV.NXT and RCV.WND should not be reduced.
+                    self.recv.nxt = tcph.sequence_number().wrapping_add(data.len() as u32);
 
-                // Once the TCP takes responsibility for the data it advances
-                // RCV.NXT over the data accepted, and adjusts RCV.WND as
-                // apporopriate to the current buffer availability.  The total of
-                // RCV.NXT and RCV.WND should not be reduced.
-                self.recv.nxt = tcph.sequence_number().wrapping_add(data.len() as u32);
-
-                // Acknowledgement: <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
-                self.send(self.send.nxt, interface)?;
+                    // TODO: Delay ACK, try to send only one
+                    // Acknowledgement: <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
+                    self.send(self.send.nxt, interface)?;
+                }
             }
         }
 
@@ -506,6 +514,7 @@ impl Connection {
             self.send(self.send.nxt, interface)?;
             match self.state {
                 ConnState::SynRecvd | ConnState::Estabilished => {
+                    eprintln!("FIN received, closing connection");
                     self.state = ConnState::CloseWait;
                 }
                 ConnState::CloseWait | ConnState::Closing | ConnState::LastAck => {}
@@ -600,18 +609,12 @@ pub fn tcp_incoming<T: TunInterface>(
     let tcp_packet = TcpPacket(ip_packet.data().into());
     let tcp_header = tcp_packet.header();
 
-    // let iph = etherparse::Ipv4HeaderSlice::from_slice(ip_packet.raw()).unwrap();
-    // let tcph = etherparse::TcpHeaderSlice::from_slice(tcp_packet.raw()).unwrap();
-    // let csum = tcph
-    //     .calc_checksum_ipv4(&iph, &tcp_packet.raw()[tcph.slice().len()..])
-    //     .unwrap();
-    // eprintln!("Checksum is {}, calculated {}", tcph.checksum(), csum);
-    // if tcp_packet.calculate_checksum(&ip_packet) != tcp_header.checksum() {
-    //     return Err(Error::new(
-    //         ErrorKind::InvalidData,
-    //         "Checksum does not match",
-    //     ));
-    // }
+    if tcp_packet.calculate_checksum(&ip_packet) != tcp_header.checksum() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Checksum does not match",
+        ));
+    }
 
     let quad = Quad {
         src: (ip_packet.header().src_addr().into(), tcp_header.src_port()),
