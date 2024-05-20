@@ -107,11 +107,6 @@ impl TcpPacketBuilder {
         self
     }
 
-    pub fn set_data(mut self, data: &[u8]) -> Self {
-        self.packet.mut_raw()[TcpPacket::TCP_HEADER_SIZE..].copy_from_slice(data);
-        self
-    }
-
     pub fn build(self) -> TcpPacket {
         self.packet
     }
