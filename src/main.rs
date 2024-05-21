@@ -18,6 +18,7 @@ mod udp;
 mod utils;
 mod tcp;
 mod test_utils;
+mod socket;
 
 struct Interface<T: TunInterface> {
     iface: T,

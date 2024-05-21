@@ -710,7 +710,7 @@ mod tcp_test {
             SendSequenceSpace {
                 iss: 0,
                 una: 0,
-                nxt: 2,
+                nxt: 22,
                 wnd: 1024,
                 up: false,
                 wl1: 0,
