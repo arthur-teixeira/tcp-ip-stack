@@ -3,7 +3,7 @@
 use std::{
     collections::LinkedList,
     mem,
-    sync::{Mutex, OnceLock},
+    sync::{RwLock, OnceLock},
 };
 
 use libc::{
@@ -54,9 +54,9 @@ impl Default for SocketManager {
     }
 }
 
-fn sockets() -> &'static Mutex<SocketManager> {
-    static SOCKS: OnceLock<Mutex<SocketManager>> = OnceLock::new();
-    SOCKS.get_or_init(|| Mutex::new(SocketManager::default()))
+fn sockets() -> &'static RwLock<SocketManager> {
+    static SOCKS: OnceLock<RwLock<SocketManager>> = OnceLock::new();
+    SOCKS.get_or_init(|| RwLock::new(SocketManager::default()))
 }
 
 fn is_accepted_type(domain: i32, stype: i32, protocol: i32) -> bool {
@@ -80,13 +80,13 @@ pub fn _socket(
     domain: i32,
     stype: i32,
     protocol: i32,
-    manager: Option<&Mutex<SocketManager>>,
+    manager: Option<&RwLock<SocketManager>>,
 ) -> i32 {
     if !is_accepted_type(domain, stype, protocol) {
         return unsafe { socket(domain, stype, protocol) };
     };
 
-    let mut mgr = manager.unwrap_or(sockets()).lock().unwrap();
+    let mut mgr = manager.unwrap_or(sockets()).write().unwrap();
 
     let fd = mgr.fd;
 
@@ -106,7 +106,7 @@ pub fn _bind(
     sockfd: i32,
     addr: *const sockaddr,
     addrlen: socklen_t,
-    manager: Option<&Mutex<SocketManager>>,
+    manager: Option<&RwLock<SocketManager>>,
 ) -> i32 {
     let mut socket = None;
 
@@ -115,7 +115,7 @@ pub fn _bind(
     }
 
     let address = unsafe { *(addr as *const sockaddr_in) };
-    let mut mgr = manager.unwrap_or(sockets()).lock().unwrap();
+    let mut mgr = manager.unwrap_or(sockets()).write().unwrap();
 
     for sock in mgr.socks.iter_mut() {
         if let SockState::Bound(port) = sock.state {
@@ -140,7 +140,7 @@ pub fn _bind(
 
 #[cfg(test)]
 mod socket_test {
-    use std::{mem, sync::Mutex};
+    use std::{mem, sync::RwLock};
 
     use libc::{in_addr, sockaddr, sockaddr_in, AF_INET, SOCK_DGRAM, SOCK_STREAM};
 
@@ -148,15 +148,15 @@ mod socket_test {
 
     use super::{SockState, SockType, _socket};
 
-    fn new_mgr() -> Mutex<SocketManager> {
-        Mutex::new(SocketManager::default())
+    fn new_mgr() -> RwLock<SocketManager> {
+        RwLock::new(SocketManager::default())
     }
 
     #[test]
     fn test_tcp_socket() {
         let mgr = new_mgr();
         let result = _socket(AF_INET, SOCK_STREAM, 0, Some(&mgr));
-        let mgr = mgr.lock().unwrap();
+        let mgr = mgr.read().unwrap();
         let sock = mgr.socks.front().expect("Expected socket to be created");
 
         assert_eq!(sock.state, SockState::Unbound);
@@ -168,7 +168,7 @@ mod socket_test {
     fn test_udp_socket() {
         let mgr = new_mgr();
         let result = _socket(AF_INET, SOCK_DGRAM, 0, Some(&mgr));
-        let mgr = mgr.lock().unwrap();
+        let mgr = mgr.read().unwrap();
         let sock = mgr.socks.front().expect("Expected socket to be created");
 
         assert_eq!(sock.state, SockState::Unbound);
@@ -196,7 +196,7 @@ mod socket_test {
             Some(&mgr),
         );
 
-        let mgr = mgr.lock().unwrap();
+        let mgr = mgr.read().unwrap();
 
         let sock = mgr.socks.front().expect("Expected socket");
         assert!(bind_result == 0);
