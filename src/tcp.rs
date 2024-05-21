@@ -487,19 +487,17 @@ impl Connection {
                 // of-order segment arrives.  The purpose of this ACK is to inform the
                 // sender that a segment was received out-of-order and which sequence
                 // number is expected.
-                if tcph.sequence_number() > self.recv.nxt {
-                    self.send(self.send.nxt, interface)?;
-                } else {
-                    // Once the TCP takes responsibility for the data it advances
-                    // RCV.NXT over the data accepted, and adjusts RCV.WND as
-                    // apporopriate to the current buffer availability.  The total of
-                    // RCV.NXT and RCV.WND should not be reduced.
+                if tcph.sequence_number() == self.recv.nxt {
                     self.recv.nxt = tcph.sequence_number().wrapping_add(data.len() as u32);
-
-                    // TODO: Delay ACK, try to send only one
-                    // Acknowledgement: <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
-                    self.send(self.send.nxt, interface)?;
                 }
+                // Once the TCP takes responsibility for the data it advances
+                // RCV.NXT over the data accepted, and adjusts RCV.WND as
+                // apporopriate to the current buffer availability.  The total of
+                // RCV.NXT and RCV.WND should not be reduced.
+
+                // TODO: Delay ACK, try to send only one
+                // Acknowledgement: <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
+                self.send(self.send.nxt, interface)?;
             }
         }
 

@@ -4,8 +4,8 @@ use buffer_view::BufferView;
 use ethernet::Frame;
 use ipv4::*;
 use libc::c_int;
-use tcp::Connections;
 use std::io::Result;
+use tcp::Connections;
 use tun_tap::{Iface, Mode};
 
 mod arp;
@@ -14,9 +14,12 @@ mod buffer_view;
 mod ethernet;
 mod icmpv4;
 mod ipv4;
+mod socket;
+mod tcp;
 mod udp;
 mod utils;
-mod tcp;
+
+#[cfg(test)]
 mod test_utils;
 
 struct Interface<T: TunInterface> {
@@ -29,7 +32,7 @@ fn main() -> Result<()> {
         iface: Iface::without_packet_info("tap1", Mode::Tap)?,
         arp_cache: ArpCache::default(),
     };
-    let mut tcp_connections= Connections::default();
+    let mut tcp_connections = Connections::default();
 
     loop {
         let mut sock_buff = BufferView::from_iface(&mut interface.iface)?;
