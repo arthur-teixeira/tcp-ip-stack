@@ -3,11 +3,7 @@ use std::{
     net::Ipv4Addr,
 };
 
-use crate::{
-    arp::TunInterface,
-    socket::{SockState, SockType},
-    utils, BufWriter, BufferView, IpProtocol, IpV4Packet,
-};
+use crate::{arp::TunInterface, utils, BufWriter, BufferView, IpProtocol, IpV4Packet};
 
 #[derive(Debug)]
 pub struct UserDatagram<'a> {
@@ -50,8 +46,13 @@ impl<'a> UserDatagram<'a> {
         let src_ip = &packet.header().src_addr().into();
         let dst_ip = &packet.header().dst_addr().into();
 
-        let result =
-            utils::ipv4_checksum(&self.to_buffer(), 3, src_ip, dst_ip, IpProtocol::UDP as u8);
+        let result = utils::ipv4_checksum(
+            &self.to_buffer(),
+            3,
+            src_ip,
+            dst_ip,
+            IpProtocol::UDP as u8,
+        );
 
         result == self.checksum
     }
@@ -62,25 +63,7 @@ pub fn udp_incoming(packet: IpV4Packet) -> Result<()> {
     let dgram = UserDatagram::from_buffer(&mut buf_view);
 
     if !dgram.validate_checksum(&packet) {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            "Checksum does not match",
-        ));
-    }
-
-    let cm = crate::socket::cm().lock().expect("Poisoned lock");
-
-    for (i, sock) in cm.connections.iter().enumerate() {
-        if sock.stype != SockType::Udp {
-            continue;
-        }
-
-        if let SockState::Bound(port) = sock.state {
-            if port == dgram.dst_port {
-                // TODO: send data to recv/read call on this fd.
-                eprintln!("Received UDP datagram on socket {i}");
-            }
-        }
+        return Err(Error::new(ErrorKind::InvalidData, "Checksum does not match"));
     }
 
     // TODO: integrate into future socket API and send data to destination port
