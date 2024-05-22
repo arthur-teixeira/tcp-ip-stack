@@ -3,17 +3,23 @@
 use std::{
     collections::LinkedList,
     mem,
-    sync::{RwLock, OnceLock},
+    sync::{OnceLock, RwLock},
 };
 
 use libc::{
-    bind, sa_family_t, sockaddr, sockaddr_in, socket, socklen_t, AF_INET, EADDRINUSE, EINVAL,
-    IPPROTO_TCP, IPPROTO_UDP, SOCK_DGRAM, SOCK_STREAM,
+    bind, sa_family_t, sockaddr, sockaddr_in, socket, socklen_t, AF_INET, EADDRINUSE, EBADF,
+    EINVAL, ENOTSUP, IPPROTO_TCP, IPPROTO_UDP, SOCK_DGRAM, SOCK_STREAM,
 };
 
-#[derive(Debug, PartialEq, Eq)]
+use crate::tcp::Connection;
+
+#[derive(Debug, PartialEq)]
 pub enum SockType {
-    Tcp,
+    Tcp {
+        max_backlog_size: usize,
+        backlog_size: usize,
+        backlog: Vec<Connection>,
+    },
     Udp,
 }
 
@@ -21,7 +27,11 @@ impl SockType {
     fn from(n: i32) -> Self {
         match n {
             SOCK_DGRAM => Self::Udp,
-            SOCK_STREAM => Self::Tcp,
+            SOCK_STREAM => Self::Tcp {
+                backlog: vec![],
+                max_backlog_size: 0,
+                backlog_size: 0,
+            },
             _ => unreachable!(),
         }
     }
@@ -30,7 +40,8 @@ impl SockType {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SockState {
     Unbound,
-    Bound(u16), // Port
+    Bound(u16),     // Port
+    Listening(u16), // Port
 }
 
 #[derive(Debug)]
@@ -110,7 +121,7 @@ pub fn _bind(
 ) -> i32 {
     let mut socket = None;
 
-    if (addrlen as usize) < mem::size_of::<sa_family_t>() {
+    if addr.is_null() || (addrlen as usize) < mem::size_of::<sa_family_t>() {
         return -EINVAL;
     }
 
@@ -138,11 +149,40 @@ pub fn _bind(
     }
 }
 
+pub fn _listen(sockfd: i32, max_backlog: i32, manager: Option<&RwLock<SocketManager>>) -> i32 {
+    let mut mgr = manager.unwrap_or(sockets()).write().unwrap();
+    let sock = mgr.socks.iter_mut().find(|s| s.fd == sockfd);
+
+    if let Some(sock) = sock {
+        if let SockType::Udp = sock.stype {
+            return -ENOTSUP;
+        }
+        let port = match sock.state {
+            SockState::Unbound => return -EBADF,
+            SockState::Listening(_) => return 0,
+            SockState::Bound(port) => port,
+        };
+        sock.state = SockState::Listening(port);
+        sock.stype = SockType::Tcp {
+            max_backlog_size: max_backlog as usize,
+            backlog_size: 0,
+            backlog: vec![],
+        };
+
+        0
+    } else {
+        -EBADF
+    }
+}
+
 #[cfg(test)]
 mod socket_test {
     use std::{mem, sync::RwLock};
 
-    use libc::{in_addr, sockaddr, sockaddr_in, AF_INET, SOCK_DGRAM, SOCK_STREAM};
+    use libc::{
+        in_addr, sa_family_t, sockaddr, sockaddr_in, AF_INET, EADDRINUSE, EINVAL, SOCK_DGRAM,
+        SOCK_STREAM,
+    };
 
     use crate::socket::{SocketManager, _bind};
 
@@ -160,7 +200,14 @@ mod socket_test {
         let sock = mgr.socks.front().expect("Expected socket to be created");
 
         assert_eq!(sock.state, SockState::Unbound);
-        assert_eq!(sock.stype, SockType::Tcp);
+        assert_eq!(
+            sock.stype,
+            SockType::Tcp {
+                backlog_size: 0,
+                max_backlog_size: 0,
+                backlog: vec![],
+            }
+        );
         assert!(result > 0);
     }
 
@@ -199,7 +246,71 @@ mod socket_test {
         let mgr = mgr.read().unwrap();
 
         let sock = mgr.socks.front().expect("Expected socket");
-        assert!(bind_result == 0);
+        assert_eq!(bind_result, 0);
         assert_eq!(sock.state, SockState::Bound(8080));
+    }
+
+    #[test]
+    fn test_bind_duplicate_port() {
+        let mgr = new_mgr();
+        let sockfd1 = _socket(AF_INET, SOCK_STREAM, 0, Some(&mgr));
+        let sockfd2 = _socket(AF_INET, SOCK_STREAM, 0, Some(&mgr));
+        assert!(sockfd1 > 0);
+        assert!(sockfd2 > 0);
+        let addr = sockaddr_in {
+            sin_family: AF_INET as u16,
+            sin_port: 8080,
+            sin_addr: in_addr { s_addr: 123 },
+            sin_zero: [0; 8],
+        };
+
+        let bind_result = _bind(
+            sockfd1,
+            &addr as *const sockaddr_in as *const sockaddr,
+            mem::size_of::<sockaddr_in>() as u32,
+            Some(&mgr),
+        );
+        assert_eq!(bind_result, 0);
+        let bind_result = _bind(
+            sockfd2,
+            &addr as *const sockaddr_in as *const sockaddr,
+            mem::size_of::<sockaddr_in>() as u32,
+            Some(&mgr),
+        );
+        assert_eq!(bind_result, -EADDRINUSE);
+    }
+
+    #[test]
+    fn test_bind_invalid_sockaddr() {
+        let mgr = new_mgr();
+        let sockfd = _socket(AF_INET, SOCK_STREAM, 0, Some(&mgr));
+        assert!(sockfd > 0);
+
+        let addr = sockaddr_in {
+            sin_family: AF_INET as u16,
+            sin_port: 8080,
+            sin_addr: in_addr { s_addr: 123 },
+            sin_zero: [0; 8],
+        };
+
+        let bind_result = _bind(
+            sockfd,
+            &addr as *const sockaddr_in as *const sockaddr,
+            mem::size_of::<u8>() as u32,
+            Some(&mgr),
+        );
+        assert_eq!(bind_result, -EINVAL);
+    }
+
+    #[test]
+    fn test_bind_null_addr() {
+        let mgr = new_mgr();
+        let bind_result = _bind(
+            1,
+            std::ptr::null(),
+            mem::size_of::<sa_family_t>() as u32,
+            Some(&mgr),
+        );
+        assert_eq!(bind_result, -EINVAL);
     }
 }
