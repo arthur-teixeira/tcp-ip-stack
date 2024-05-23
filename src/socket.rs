@@ -3,7 +3,7 @@
 use std::{
     collections::LinkedList,
     mem,
-    sync::{OnceLock, RwLock},
+    sync::{OnceLock, RwLock, RwLockWriteGuard},
 };
 
 use libc::{
@@ -149,8 +149,32 @@ pub fn _bind(
     }
 }
 
+fn get_highest_port<'a>(manager: &RwLockWriteGuard<'a, SocketManager>) -> u16 {
+    manager.socks.iter().fold(1024, |acc, s| {
+        if let SockState::Bound(port) = s.state {
+            if port > acc {
+                return port;
+            }
+            return acc;
+        }
+
+        if let SockState::Listening(port) = s.state {
+            if port > acc {
+                return port;
+            }
+
+            return acc;
+        }
+
+        return acc;
+    })
+}
+
 pub fn _listen(sockfd: i32, max_backlog: i32, manager: Option<&RwLock<SocketManager>>) -> i32 {
-    let mut mgr = manager.unwrap_or(sockets()).write().unwrap();
+    let manager = manager.unwrap_or(sockets());
+    let mut mgr = manager.write().unwrap();
+    let highest_port = get_highest_port(&mgr) + 1;
+
     let sock = mgr.socks.iter_mut().find(|s| s.fd == sockfd);
 
     if let Some(sock) = sock {
@@ -158,10 +182,11 @@ pub fn _listen(sockfd: i32, max_backlog: i32, manager: Option<&RwLock<SocketMana
             return -ENOTSUP;
         }
         let port = match sock.state {
-            SockState::Unbound => return -EBADF,
+            SockState::Unbound => highest_port,
             SockState::Listening(_) => return 0,
             SockState::Bound(port) => port,
         };
+
         sock.state = SockState::Listening(port);
         sock.stype = SockType::Tcp {
             max_backlog_size: max_backlog as usize,
@@ -180,13 +205,11 @@ mod socket_test {
     use std::{mem, sync::RwLock};
 
     use libc::{
-        in_addr, sa_family_t, sockaddr, sockaddr_in, AF_INET, EADDRINUSE, EINVAL, SOCK_DGRAM,
-        SOCK_STREAM,
+        in_addr, sa_family_t, sockaddr, sockaddr_in, AF_INET, EADDRINUSE, EBADF, EINVAL, ENOTSUP,
+        SOCK_DGRAM, SOCK_STREAM,
     };
 
-    use crate::socket::{SocketManager, _bind};
-
-    use super::{SockState, SockType, _socket};
+    use super::{SockState, SockType, SocketManager, _bind, _listen, _socket};
 
     fn new_mgr() -> RwLock<SocketManager> {
         RwLock::new(SocketManager::default())
@@ -312,5 +335,74 @@ mod socket_test {
             Some(&mgr),
         );
         assert_eq!(bind_result, -EINVAL);
+    }
+
+    #[test]
+    fn test_udp_listen() {
+        let mgr = new_mgr();
+        let sock = _socket(AF_INET, SOCK_DGRAM, 0, Some(&mgr));
+        assert!(sock > 0);
+        let addr = sockaddr_in {
+            sin_family: AF_INET as u16,
+            sin_port: 8080,
+            sin_addr: in_addr { s_addr: 123 },
+            sin_zero: [0; 8],
+        };
+
+        let bind_result = _bind(
+            sock,
+            &addr as *const sockaddr_in as *const sockaddr,
+            mem::size_of::<sa_family_t>() as u32,
+            Some(&mgr),
+        );
+        assert_eq!(bind_result, 0);
+
+        let listen_result = _listen(sock, 10, Some(&mgr));
+
+        assert_eq!(listen_result, -ENOTSUP);
+    }
+
+    #[test]
+    fn test_tcp_listen() {
+        let mgr = new_mgr();
+        let sock = _socket(AF_INET, SOCK_STREAM, 0, Some(&mgr));
+        assert!(sock > 0);
+
+        let addr = sockaddr_in {
+            sin_family: AF_INET as u16,
+            sin_port: 8080,
+            sin_addr: in_addr { s_addr: 123 },
+            sin_zero: [0; 8],
+        };
+
+        let bind_result = _bind(
+            sock,
+            &addr as *const sockaddr_in as *const sockaddr,
+            mem::size_of::<sa_family_t>() as u32,
+            Some(&mgr),
+        );
+        assert_eq!(bind_result, 0);
+
+        let listen_result = _listen(sock, 10, Some(&mgr));
+        assert_eq!(listen_result, 0);
+    }
+
+    #[test]
+    fn test_bad_fd_listen() {
+        let mgr = new_mgr();
+        let sock = 123;
+
+        let listen_result = _listen(sock, 10, Some(&mgr));
+        assert_eq!(listen_result, -EBADF);
+    }
+
+    #[test] 
+    fn test_unbound_listen() {
+        let mgr = new_mgr();
+        let sock = _socket(AF_INET, SOCK_STREAM, 0, Some(&mgr));
+        assert!(sock > 0);
+
+        let listen_result = _listen(sock, 10, Some(&mgr));
+        assert_eq!(listen_result, 0);
     }
 }
