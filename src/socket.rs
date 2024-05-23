@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::LinkedList,
+    collections::{LinkedList, VecDeque},
     mem,
     sync::{OnceLock, RwLock, RwLockWriteGuard},
 };
@@ -11,26 +11,26 @@ use libc::{
     EINVAL, ENOTSUP, IPPROTO_TCP, IPPROTO_UDP, SOCK_DGRAM, SOCK_STREAM,
 };
 
-use crate::tcp::Connection;
+use crate::tcp::Connections;
 
 #[derive(Debug, PartialEq)]
-pub enum SockType {
+pub enum SockProto {
     Tcp {
         max_backlog_size: usize,
-        backlog_size: usize,
-        backlog: Vec<Connection>,
+        backlog: Connections,
+        syn_backlog: Connections,
     },
     Udp,
 }
 
-impl SockType {
+impl SockProto {
     fn from(n: i32) -> Self {
         match n {
             SOCK_DGRAM => Self::Udp,
             SOCK_STREAM => Self::Tcp {
-                backlog: vec![],
+                backlog: Default::default(),
+                syn_backlog: Default::default(),
                 max_backlog_size: 0,
-                backlog_size: 0,
             },
             _ => unreachable!(),
         }
@@ -46,14 +46,36 @@ pub enum SockState {
 
 #[derive(Debug)]
 pub struct Socket {
-    state: SockState,
-    stype: SockType,
-    fd: i32,
+    pub state: SockState,
+    pub proto: SockProto,
+    pub fd: i32,
+
+    pub recv_queue: VecDeque<Box<[u8]>>,
+    pub send_queue: VecDeque<Box<[u8]>>,
+}
+
+impl Socket {
+    pub fn listen_port(&self) -> Option<u16> {
+        match self.state {
+            SockState::Listening(p) => Some(p),
+            SockState::Bound(p) => match self.proto {
+                SockProto::Udp => Some(p),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 pub struct SocketManager {
-    socks: LinkedList<Socket>,
-    fd: i32,
+    pub socks: LinkedList<Socket>,
+    pub fd: i32,
+}
+
+impl SocketManager {
+    fn get_sock(&mut self, sockfd: i32) -> Option<&mut Socket> {
+        self.socks.iter_mut().find(|s| s.fd == sockfd)
+    }
 }
 
 impl Default for SocketManager {
@@ -65,7 +87,7 @@ impl Default for SocketManager {
     }
 }
 
-fn sockets() -> &'static RwLock<SocketManager> {
+pub fn sockets() -> &'static RwLock<SocketManager> {
     static SOCKS: OnceLock<RwLock<SocketManager>> = OnceLock::new();
     SOCKS.get_or_init(|| RwLock::new(SocketManager::default()))
 }
@@ -102,9 +124,11 @@ pub fn _socket(
     let fd = mgr.fd;
 
     let sock = Socket {
-        stype: SockType::from(stype),
+        proto: SockProto::from(stype),
         state: SockState::Unbound,
         fd,
+        recv_queue: Default::default(),
+        send_queue: Default::default(),
     };
 
     mgr.socks.push_back(sock);
@@ -178,7 +202,7 @@ pub fn _listen(sockfd: i32, max_backlog: i32, manager: Option<&RwLock<SocketMana
     let sock = mgr.socks.iter_mut().find(|s| s.fd == sockfd);
 
     if let Some(sock) = sock {
-        if let SockType::Udp = sock.stype {
+        if let SockProto::Udp = sock.proto {
             return -ENOTSUP;
         }
         let port = match sock.state {
@@ -188,15 +212,41 @@ pub fn _listen(sockfd: i32, max_backlog: i32, manager: Option<&RwLock<SocketMana
         };
 
         sock.state = SockState::Listening(port);
-        sock.stype = SockType::Tcp {
+        sock.proto = SockProto::Tcp {
             max_backlog_size: max_backlog as usize,
-            backlog_size: 0,
-            backlog: vec![],
+            syn_backlog: Default::default(),
+            backlog: Default::default(),
         };
 
         0
     } else {
         -EBADF
+    }
+}
+
+// ssize_t recv(int sockfd, void *buf, size_t len, int flags);
+// TODO: use flags
+// TODO: change the loop to wait for a condvar before reading from socket buffer again.
+// TODO: Change buf to be a slice of u8
+pub fn _recv(sockfd: i32, buf: &mut Vec<u8>) -> isize {
+    loop {
+        let manager = sockets();
+        let mut mgr = manager.write().unwrap();
+        let sock = mgr.get_sock(sockfd);
+
+        if let Some(sock) = sock {
+            if !sock.recv_queue.is_empty() {
+                let msg = sock
+                    .recv_queue
+                    .pop_front()
+                    .expect("expected recv queue to have item");
+
+                buf.extend_from_slice(&msg);
+                return msg.len() as isize;
+            }
+        } else {
+            return -EBADF as isize;
+        }
     }
 }
 
@@ -209,7 +259,7 @@ mod socket_test {
         SOCK_DGRAM, SOCK_STREAM,
     };
 
-    use super::{SockState, SockType, SocketManager, _bind, _listen, _socket};
+    use super::{SockProto, SockState, SocketManager, _bind, _listen, _socket};
 
     fn new_mgr() -> RwLock<SocketManager> {
         RwLock::new(SocketManager::default())
@@ -224,11 +274,11 @@ mod socket_test {
 
         assert_eq!(sock.state, SockState::Unbound);
         assert_eq!(
-            sock.stype,
-            SockType::Tcp {
-                backlog_size: 0,
+            sock.proto,
+            SockProto::Tcp {
+                syn_backlog: Default::default(),
                 max_backlog_size: 0,
-                backlog: vec![],
+                backlog: Default::default(),
             }
         );
         assert!(result > 0);
@@ -242,7 +292,7 @@ mod socket_test {
         let sock = mgr.socks.front().expect("Expected socket to be created");
 
         assert_eq!(sock.state, SockState::Unbound);
-        assert_eq!(sock.stype, SockType::Udp);
+        assert_eq!(sock.proto, SockProto::Udp);
         assert!(result > 0);
     }
 
@@ -396,7 +446,7 @@ mod socket_test {
         assert_eq!(listen_result, -EBADF);
     }
 
-    #[test] 
+    #[test]
     fn test_unbound_listen() {
         let mgr = new_mgr();
         let sock = _socket(AF_INET, SOCK_STREAM, 0, Some(&mgr));

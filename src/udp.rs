@@ -1,9 +1,9 @@
-use std::{
-    io::{Error, ErrorKind, Result},
-    net::Ipv4Addr,
-};
+use std::io::{Error, ErrorKind, Result};
 
-use crate::{arp::TunInterface, utils, BufWriter, BufferView, IpProtocol, IpV4Packet};
+use crate::{
+    socket::{sockets, SockProto},
+    utils, BufWriter, BufferView, IpProtocol, IpV4Packet,
+};
 
 #[derive(Debug)]
 pub struct UserDatagram<'a> {
@@ -46,13 +46,8 @@ impl<'a> UserDatagram<'a> {
         let src_ip = &packet.header().src_addr().into();
         let dst_ip = &packet.header().dst_addr().into();
 
-        let result = utils::ipv4_checksum(
-            &self.to_buffer(),
-            3,
-            src_ip,
-            dst_ip,
-            IpProtocol::UDP as u8,
-        );
+        let result =
+            utils::ipv4_checksum(&self.to_buffer(), 3, src_ip, dst_ip, IpProtocol::UDP as u8);
 
         result == self.checksum
     }
@@ -63,9 +58,31 @@ pub fn udp_incoming(packet: IpV4Packet) -> Result<()> {
     let dgram = UserDatagram::from_buffer(&mut buf_view);
 
     if !dgram.validate_checksum(&packet) {
-        return Err(Error::new(ErrorKind::InvalidData, "Checksum does not match"));
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Checksum does not match",
+        ));
     }
 
-    // TODO: integrate into future socket API and send data to destination port
-    Ok(())
+    let mut socks = sockets().write().unwrap();
+    let sock = socks.socks.iter_mut().find(|s| {
+        if s.proto == SockProto::Udp {
+            s.listen_port().unwrap_or(0) == dgram.dst_port
+        } else {
+            false
+        }
+    });
+
+    if let Some(sock) = sock {
+        eprintln!("Writing message to socket queue");
+        sock.recv_queue.push_back(dgram.data.into());
+        Ok(())
+    } else {
+        eprintln!(
+            "No UDP socket listening on port {}, dropping datagram",
+            dgram.dst_port
+        );
+
+        Ok(())
+    }
 }
