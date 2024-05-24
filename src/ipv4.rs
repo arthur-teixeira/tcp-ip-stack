@@ -4,7 +4,6 @@ use std::net::Ipv4Addr;
 
 use crate::arp::{ArpHwType, TunInterface, MAC_OCTETS};
 use crate::ethernet::Frame;
-use crate::tcp::Connections;
 use crate::utils::calculate_checksum;
 use crate::{icmpv4, tcp, udp, Interface};
 
@@ -79,7 +78,6 @@ impl IpV4Packet {
 pub fn ipv4_recv<T: TunInterface>(
     frame_data: &[u8],
     interface: &mut Interface<T>,
-    tcp_connections: &mut Connections,
 ) -> Result<()> {
     let packet = IpV4Packet(frame_data.to_vec());
     let hdr = packet.header();
@@ -108,7 +106,7 @@ pub fn ipv4_recv<T: TunInterface>(
 
     match hdr.proto() {
         ICMPV4 => icmpv4::icmpv4_incoming(packet, interface),
-        IP_TCP => tcp::tcp_incoming(packet, interface, tcp_connections),
+        IP_TCP => tcp::tcp_incoming(packet, interface),
         IP_UDP => udp::udp_incoming(packet),
         _ => Err(Error::new(
             ErrorKind::Unsupported,

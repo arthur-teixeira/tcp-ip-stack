@@ -7,18 +7,22 @@ use std::{
 };
 
 use libc::{
-    bind, sa_family_t, sockaddr, sockaddr_in, socket, socklen_t, AF_INET, EADDRINUSE, EBADF,
-    EINVAL, ENOTSUP, IPPROTO_TCP, IPPROTO_UDP, SOCK_DGRAM, SOCK_STREAM,
+    accept, bind, c_void, listen, recv, sa_family_t, sockaddr, sockaddr_in, socket, socklen_t,
+    AF_INET, EADDRINUSE, EBADF, EINVAL, ENOTSUP, EOPNOTSUPP, IPPROTO_TCP, IPPROTO_UDP, SOCK_DGRAM,
+    SOCK_STREAM,
 };
 
-use crate::tcp::Connections;
+use crate::tcp::{Connection, Connections, Quad};
 
 #[derive(Debug, PartialEq)]
 pub enum SockProto {
-    Tcp {
+    TcpListener {
         max_backlog_size: usize,
         backlog: Connections,
-        syn_backlog: Connections,
+    },
+    TcpStream {
+        quad: Quad,
+        conn: Connection,
     },
     Udp,
 }
@@ -27,9 +31,8 @@ impl SockProto {
     fn from(n: i32) -> Self {
         match n {
             SOCK_DGRAM => Self::Udp,
-            SOCK_STREAM => Self::Tcp {
+            SOCK_STREAM => Self::TcpListener {
                 backlog: Default::default(),
-                syn_backlog: Default::default(),
                 max_backlog_size: 0,
             },
             _ => unreachable!(),
@@ -42,6 +45,7 @@ pub enum SockState {
     Unbound,
     Bound(u16),     // Port
     Listening(u16), // Port
+    Connected,
 }
 
 #[derive(Debug)]
@@ -63,6 +67,13 @@ impl Socket {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    pub fn listening(&self) -> bool {
+        match self.state {
+            SockState::Listening(_) => true,
+            _ => false,
         }
     }
 }
@@ -134,7 +145,7 @@ pub fn _socket(
     mgr.socks.push_back(sock);
     mgr.fd += 1;
 
-    return fd;
+    fd
 }
 
 pub fn _bind(
@@ -199,7 +210,7 @@ pub fn _listen(sockfd: i32, max_backlog: i32, manager: Option<&RwLock<SocketMana
     let mut mgr = manager.write().unwrap();
     let highest_port = get_highest_port(&mgr) + 1;
 
-    let sock = mgr.socks.iter_mut().find(|s| s.fd == sockfd);
+    let sock = mgr.get_sock(sockfd);
 
     if let Some(sock) = sock {
         if let SockProto::Udp = sock.proto {
@@ -209,18 +220,83 @@ pub fn _listen(sockfd: i32, max_backlog: i32, manager: Option<&RwLock<SocketMana
             SockState::Unbound => highest_port,
             SockState::Listening(_) => return 0,
             SockState::Bound(port) => port,
+            SockState::Connected => return -EOPNOTSUPP,
         };
 
         sock.state = SockState::Listening(port);
-        sock.proto = SockProto::Tcp {
+        sock.proto = SockProto::TcpListener {
             max_backlog_size: max_backlog as usize,
-            syn_backlog: Default::default(),
             backlog: Default::default(),
         };
 
         0
     } else {
-        -EBADF
+        unsafe { listen(sockfd, max_backlog) }
+    }
+}
+
+pub fn _accept(
+    sockfd: i32,
+    addr: *mut sockaddr,
+    addrlen: *mut socklen_t,
+    manager: Option<&RwLock<SocketManager>>,
+) -> i32 {
+    loop {
+        let mut mgr = manager.unwrap_or(sockets()).write().unwrap();
+        let fd = mgr.fd;
+        let sock = mgr.get_sock(sockfd);
+
+        if let Some(sock) = sock {
+            if sock.proto == SockProto::Udp {
+                return -EOPNOTSUPP;
+            }
+            if !sock.listening() {
+                return -EBADF;
+            }
+
+            if let SockProto::TcpListener {
+                ref mut max_backlog_size,
+                ref mut backlog,
+            } = sock.proto
+            {
+                if !backlog.is_empty() {
+                    *max_backlog_size -= 1;
+                    let (quad, conn) = backlog
+                        .pop_first()
+                        .expect("Expected backlog not to be empty");
+
+                    let new_sock = Socket {
+                        proto: SockProto::TcpStream { quad, conn },
+                        state: SockState::Connected,
+                        fd,
+                        recv_queue: Default::default(),
+                        send_queue: Default::default(),
+                    };
+
+                    mgr.fd += 1;
+                    mgr.socks.push_back(new_sock);
+                    if !addr.is_null() {
+                        if addrlen.is_null() {
+                            return -EINVAL;
+                        }
+                        let mut addr_in;
+                        unsafe {
+                            addr_in = *(addr as *mut sockaddr_in);
+                            *addrlen = std::mem::size_of::<sockaddr_in>() as u32;
+                        }
+                        addr_in.sin_port = quad.src.1;
+                        addr_in.sin_family = AF_INET as u16;
+                        addr_in.sin_addr.s_addr = quad.src.0.into();
+                    }
+
+                    return fd;
+                }
+            } else {
+                return -EINVAL;
+            }
+        } else {
+            return unsafe { accept(sockfd, addr, addrlen) };
+        }
     }
 }
 
@@ -245,7 +321,7 @@ pub fn _recv(sockfd: i32, buf: &mut Vec<u8>) -> isize {
                 return msg.len() as isize;
             }
         } else {
-            return -EBADF as isize;
+            return unsafe { recv(sockfd, buf.as_slice().as_ptr() as *mut c_void, buf.len(), 0) };
         }
     }
 }
@@ -255,7 +331,7 @@ mod socket_test {
     use std::{mem, sync::RwLock};
 
     use libc::{
-        in_addr, sa_family_t, sockaddr, sockaddr_in, AF_INET, EADDRINUSE, EBADF, EINVAL, ENOTSUP,
+        in_addr, sa_family_t, sockaddr, sockaddr_in, AF_INET, EADDRINUSE, EINVAL, ENOTSUP,
         SOCK_DGRAM, SOCK_STREAM,
     };
 
@@ -275,8 +351,7 @@ mod socket_test {
         assert_eq!(sock.state, SockState::Unbound);
         assert_eq!(
             sock.proto,
-            SockProto::Tcp {
-                syn_backlog: Default::default(),
+            SockProto::TcpListener {
                 max_backlog_size: 0,
                 backlog: Default::default(),
             }
@@ -435,15 +510,6 @@ mod socket_test {
 
         let listen_result = _listen(sock, 10, Some(&mgr));
         assert_eq!(listen_result, 0);
-    }
-
-    #[test]
-    fn test_bad_fd_listen() {
-        let mgr = new_mgr();
-        let sock = 123;
-
-        let listen_result = _listen(sock, 10, Some(&mgr));
-        assert_eq!(listen_result, -EBADF);
     }
 
     #[test]

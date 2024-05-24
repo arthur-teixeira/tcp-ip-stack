@@ -5,10 +5,10 @@ use ethernet::Frame;
 use ipv4::*;
 use libc::{
     c_int, in_addr, sa_family_t, sockaddr, sockaddr_in, AF_INET, INADDR_LOOPBACK, SOCK_DGRAM,
+    SOCK_STREAM,
 };
-use socket::{_bind, _listen, _recv, _socket};
+use socket::{_accept, _bind, _listen, _socket};
 use std::io::{Error, Result};
-use tcp::Connections;
 use tun_tap::{Iface, Mode};
 
 mod arp;
@@ -57,14 +57,40 @@ fn create_udp_socket() -> Result<i32> {
     Ok(sockfd)
 }
 
+fn create_tcp_socket() -> Result<i32> {
+    let sockfd = _socket(AF_INET, SOCK_STREAM, 0, None);
+    if sockfd < 0 {
+        return Err(Error::from_raw_os_error(-sockfd));
+    }
+
+    let addr = sockaddr_in {
+        sin_port: 1337,
+        sin_family: AF_INET as u16,
+        sin_addr: in_addr {
+            s_addr: INADDR_LOOPBACK,
+        },
+        sin_zero: [0; 8],
+    };
+
+    let bind_result = _bind(
+        sockfd,
+        &addr as *const sockaddr_in as *const sockaddr,
+        std::mem::size_of::<sa_family_t>() as u32,
+        None,
+    );
+
+    if bind_result < 0 {
+        return Err(Error::from_raw_os_error(-bind_result));
+    }
+
+    Ok(sockfd)
+}
+
 fn main() -> Result<()> {
     let mut interface = Interface {
         iface: Iface::without_packet_info("tap1", Mode::Tap)?,
         arp_cache: ArpCache::default(),
     };
-    let mut tcp_connections = Connections::default();
-
-    let sockfd = create_udp_socket()?;
 
     let loop_handle = std::thread::spawn(move || {
         loop {
@@ -78,7 +104,7 @@ fn main() -> Result<()> {
                     }
                 }
                 libc::ETH_P_IP => {
-                    if let Err(e) = ipv4_recv(frame.payload, &mut interface, &mut tcp_connections) {
+                    if let Err(e) = ipv4_recv(frame.payload, &mut interface) {
                         eprintln!("Error: {e}");
                     }
                 }
@@ -90,13 +116,17 @@ fn main() -> Result<()> {
         }
     });
 
-    loop {
-        let mut buf = Vec::new();
-        let nb = _recv(sockfd, &mut buf);
-        eprintln!("Received message through socket! Got {nb} bytes");
-        eprintln!("Message: {buf:?}");
+    let sockfd = create_tcp_socket()?;
+
+    let listen_result = _listen(sockfd, 10, None);
+    if listen_result < 0 {
+        return Err(Error::from_raw_os_error(-listen_result));
     }
 
+    loop {
+        let new_conn = _accept(sockfd, std::ptr::null_mut(), std::ptr::null_mut(), None);
+        eprintln!("Received new TCP connection!");
+    }
     // loop_handle.join().expect("Could not join thread");
     // Ok(())
 }

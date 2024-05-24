@@ -1,12 +1,16 @@
 use std::{
-    collections::{hash_map::Entry, BTreeMap, HashMap, VecDeque},
-    fs::OpenOptions,
-    io::{Error, ErrorKind, Read, Result, Write},
+    collections::{btree_map::Entry, BTreeMap, VecDeque},
+    io::{Error, ErrorKind, Result},
     net::Ipv4Addr,
     time,
 };
 
-use crate::{arp::TunInterface, ipv4_send, utils, Interface, IpProtocol, IpV4Packet};
+use crate::{
+    arp::TunInterface,
+    ipv4_send,
+    socket::{sockets, SockProto},
+    utils, Interface, IpProtocol, IpV4Packet,
+};
 
 use bitfield::bitfield;
 
@@ -35,7 +39,7 @@ bitfield! {
     pub u16, urgent_ptr, set_urgent_ptr: 159, 144;
 }
 
-pub type Connections = HashMap<Quad, Connection>;
+pub type Connections = BTreeMap<Quad, Connection>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TcpPacket(pub Vec<u8>);
@@ -70,6 +74,7 @@ fn tcp_new_connection<'a, T: TunInterface>(
     ip_packet: IpV4Packet,
     tcp_packet: TcpPacket,
     interface: &mut Interface<T>,
+    accept: bool,
 ) -> Result<Option<Connection>> {
     let tcph = tcp_packet.header();
 
@@ -124,7 +129,13 @@ fn tcp_new_connection<'a, T: TunInterface>(
     };
 
     c.tcp.mut_header().set_ack(true);
-    c.tcp.mut_header().set_syn(true);
+
+    if !accept {
+        c.tcp.mut_header().set_rst(true);
+        c.tcp.mut_header().set_syn(false);
+    } else {
+        c.tcp.mut_header().set_syn(true);
+    }
 
     c.send(c.send.nxt, interface)?;
     c.tcp.mut_header().set_syn(false);
@@ -133,10 +144,33 @@ fn tcp_new_connection<'a, T: TunInterface>(
     Ok(Some(c))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord)]
 pub struct Quad {
-    src: (Ipv4Addr, u16),
-    dst: (Ipv4Addr, u16),
+    pub time: time::Instant,
+    pub src: (Ipv4Addr, u16),
+    pub dst: (Ipv4Addr, u16),
+}
+
+impl PartialOrd for Quad {
+    fn lt(&self, other: &Self) -> bool {
+        self.time.lt(&other.time)
+    }
+
+    fn le(&self, other: &Self) -> bool {
+        self.time.le(&other.time)
+    }
+
+    fn gt(&self, other: &Self) -> bool {
+        self.time.gt(&other.time)
+    }
+
+    fn ge(&self, other: &Self) -> bool {
+        self.time.ge(&other.time)
+    }
+
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.time.partial_cmp(&other.time)
+    }
 }
 
 #[allow(dead_code)]
@@ -158,6 +192,13 @@ impl ConnState {
     fn should_keep(&self) -> bool {
         match self {
             Self::Closed | Self::Listen => false,
+            _ => true,
+        }
+    }
+
+    fn estabilished(&self) -> bool {
+        match self {
+            Self::SynRecvd | Self::Closed | Self::Listen => false,
             _ => true,
         }
     }
@@ -604,7 +645,6 @@ impl Connection {
 pub fn tcp_incoming<T: TunInterface>(
     ip_packet: IpV4Packet,
     interface: &mut Interface<T>,
-    tcp_connections: &mut Connections,
 ) -> Result<()> {
     let tcp_packet = TcpPacket(ip_packet.data().into());
     let tcp_header = tcp_packet.header();
@@ -617,20 +657,62 @@ pub fn tcp_incoming<T: TunInterface>(
     }
 
     let quad = Quad {
+        time: time::Instant::now(),
         src: (ip_packet.header().src_addr().into(), tcp_header.src_port()),
         dst: (ip_packet.header().dst_addr().into(), tcp_header.dst_port()),
     };
 
-    match tcp_connections.entry(quad) {
-        Entry::Occupied(mut c) => c.get_mut().incoming_packet(&tcp_packet, interface)?,
-        Entry::Vacant(e) => {
-            if let Some(c) = tcp_new_connection(ip_packet, tcp_packet, interface)? {
-                e.insert(c);
-            }
-        }
-    }
+    let mut sock_manager = sockets().write().unwrap();
+    let sock = sock_manager
+        .socks
+        .iter_mut()
+        .find(|s| match s.listen_port() {
+            None => false,
+            Some(p) => p == tcp_header.dst_port() && s.listening(),
+        });
 
-    tcp_connections.retain(|_, v| v.state.should_keep());
+    if let Some(sock) = sock {
+        if let SockProto::TcpListener {
+            max_backlog_size,
+            ref mut backlog,
+        } = sock.proto
+        {
+            // The behavior of the backlog argument on TCP sockets changed with Linux 2.2.
+            // Now it specifies the queue length for completely established sockets waiting to be accepted,
+            // instead of the number of  instead of the number of  incomplete connection requests.
+            if backlog
+                .iter()
+                .filter(|(_, v)| v.state.estabilished())
+                .count()
+                >= max_backlog_size
+            {
+                eprintln!("Socket backlog is full, dropping packet");
+                return Ok(());
+            }
+
+            match backlog.entry(quad) {
+                Entry::Occupied(mut c) => c.get_mut().incoming_packet(&tcp_packet, interface)?,
+                Entry::Vacant(e) => {
+                    if let Some(c) = tcp_new_connection(ip_packet, tcp_packet, interface, true)? {
+                        e.insert(c);
+                    }
+                }
+            }
+
+            backlog.retain(|_, v| v.state.should_keep());
+        } else {
+            unreachable!()
+        }
+    } else {
+        eprintln!(
+            "No TCP socket listening on port {}, dropping packet",
+            tcp_header.dst_port()
+        );
+
+        // Send RST
+        tcp_new_connection(ip_packet, tcp_packet, interface, false)?;
+        return Ok(());
+    }
 
     Ok(())
 }
@@ -691,7 +773,7 @@ mod tcp_test {
             .set_checksum(&ip_packet)
             .build();
 
-        let conn = tcp_new_connection(ip_packet, tcp_packet, &mut interface)
+        let conn = tcp_new_connection(ip_packet, tcp_packet, &mut interface, true)
             .expect("Expected Ok")
             .expect("Expected connection to be created");
 
@@ -757,7 +839,7 @@ mod tcp_test {
             .build();
 
         let conn =
-            tcp_new_connection(ip_packet, tcp_packet, &mut interface).expect("Expected no errors");
+            tcp_new_connection(ip_packet, tcp_packet, &mut interface, true).expect("Expected no errors");
         assert_eq!(conn, None);
     }
 
@@ -787,7 +869,7 @@ mod tcp_test {
             .build();
 
         let conn =
-            tcp_new_connection(ip_packet, tcp_packet, &mut interface).expect("Expected no errors");
+            tcp_new_connection(ip_packet, tcp_packet, &mut interface, true).expect("Expected no errors");
         assert_eq!(conn, None);
     }
 }
