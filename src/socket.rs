@@ -20,10 +20,7 @@ pub enum SockProto {
         max_backlog_size: usize,
         backlog: Connections,
     },
-    TcpStream {
-        quad: Quad,
-        conn: Connection,
-    },
+    TcpStream,
     Udp,
 }
 
@@ -40,12 +37,12 @@ impl SockProto {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum SockState {
     Unbound,
     Bound(u16),     // Port
     Listening(u16), // Port
-    Connected,
+    Connected { quad: Quad, conn: Connection },
 }
 
 #[derive(Debug)]
@@ -66,13 +63,17 @@ impl Socket {
                 SockProto::Udp => Some(p),
                 _ => None,
             },
+            SockState::Connected { quad, .. } => {
+                dbg!(quad);
+                Some(quad.dst.1)
+            }
             _ => None,
         }
     }
 
     pub fn listening(&self) -> bool {
         match self.state {
-            SockState::Listening(_) => true,
+            SockState::Listening(_) | SockState::Connected { .. } => true,
             _ => false,
         }
     }
@@ -80,12 +81,32 @@ impl Socket {
 
 pub struct SocketManager {
     pub socks: LinkedList<Socket>,
+    pub stream_socks: LinkedList<Socket>,
     pub fd: i32,
 }
 
 impl SocketManager {
-    fn get_sock(&mut self, sockfd: i32) -> Option<&mut Socket> {
-        self.socks.iter_mut().find(|s| s.fd == sockfd)
+    pub fn get_sock(&mut self, sockfd: i32) -> Option<&mut Socket> {
+        self.socks
+            .iter_mut()
+            .find(|s| s.fd == sockfd)
+            .or(self.stream_socks.iter_mut().find(|s| s.fd == sockfd))
+    }
+
+    pub fn get_sock_by_quad(&mut self, search_quad: &Quad) -> Option<&mut Socket> {
+        self.stream_socks
+            .iter_mut()
+            .find(|s| match s.proto {
+                SockProto::TcpStream => match s.state {
+                    SockState::Connected { quad, .. } => quad == *search_quad,
+                    _ => false,
+                },
+                _ => false,
+            })
+            .or(self.socks.iter_mut().find(|s| match s.listen_port() {
+                None => false,
+                Some(p) => p == search_quad.dst.1 && s.listening(),
+            }))
     }
 }
 
@@ -93,6 +114,7 @@ impl Default for SocketManager {
     fn default() -> Self {
         Self {
             socks: LinkedList::new(),
+            stream_socks: LinkedList::new(),
             fd: 4097,
         }
     }
@@ -220,7 +242,7 @@ pub fn _listen(sockfd: i32, max_backlog: i32, manager: Option<&RwLock<SocketMana
             SockState::Unbound => highest_port,
             SockState::Listening(_) => return 0,
             SockState::Bound(port) => port,
-            SockState::Connected => return -EOPNOTSUPP,
+            SockState::Connected { .. } => return -EOPNOTSUPP,
         };
 
         sock.state = SockState::Listening(port);
@@ -266,15 +288,15 @@ pub fn _accept(
                         .expect("Expected backlog not to be empty");
 
                     let new_sock = Socket {
-                        proto: SockProto::TcpStream { quad, conn },
-                        state: SockState::Connected,
+                        proto: SockProto::TcpStream,
+                        state: SockState::Connected { quad, conn },
                         fd,
                         recv_queue: Default::default(),
                         send_queue: Default::default(),
                     };
 
                     mgr.fd += 1;
-                    mgr.socks.push_back(new_sock);
+                    mgr.stream_socks.push_back(new_sock);
                     if !addr.is_null() {
                         if addrlen.is_null() {
                             return -EINVAL;

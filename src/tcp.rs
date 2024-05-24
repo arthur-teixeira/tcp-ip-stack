@@ -8,7 +8,7 @@ use std::{
 use crate::{
     arp::TunInterface,
     ipv4_send,
-    socket::{sockets, SockProto},
+    socket::{sockets, SockProto, SockState},
     utils, Interface, IpProtocol, IpV4Packet,
 };
 
@@ -144,11 +144,17 @@ fn tcp_new_connection<'a, T: TunInterface>(
     Ok(Some(c))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord)]
+#[derive(Debug, Clone, Copy, Eq, Hash, Ord)]
 pub struct Quad {
-    pub time: time::Instant,
+    pub time: time::Instant, // Only for sorting purposes in B-Tree
     pub src: (Ipv4Addr, u16),
     pub dst: (Ipv4Addr, u16),
+}
+
+impl PartialEq for Quad {
+    fn eq(&self, other: &Self) -> bool {
+        self.src.eq(&other.src) && self.dst.eq(&other.dst)
+    }
 }
 
 impl PartialOrd for Quad {
@@ -656,52 +662,54 @@ pub fn tcp_incoming<T: TunInterface>(
         ));
     }
 
-    let quad = Quad {
+    let new_quad = Quad {
         time: time::Instant::now(),
         src: (ip_packet.header().src_addr().into(), tcp_header.src_port()),
         dst: (ip_packet.header().dst_addr().into(), tcp_header.dst_port()),
     };
 
     let mut sock_manager = sockets().write().unwrap();
-    let sock = sock_manager
-        .socks
-        .iter_mut()
-        .find(|s| match s.listen_port() {
-            None => false,
-            Some(p) => p == tcp_header.dst_port() && s.listening(),
-        });
+    let sock = sock_manager.get_sock_by_quad(&new_quad);
 
     if let Some(sock) = sock {
-        if let SockProto::TcpListener {
-            max_backlog_size,
-            ref mut backlog,
-        } = sock.proto
-        {
-            // The behavior of the backlog argument on TCP sockets changed with Linux 2.2.
-            // Now it specifies the queue length for completely established sockets waiting to be accepted,
-            // instead of the number of  instead of the number of  incomplete connection requests.
-            if backlog
-                .iter()
-                .filter(|(_, v)| v.state.estabilished())
-                .count()
-                >= max_backlog_size
-            {
-                eprintln!("Socket backlog is full, dropping packet");
-                return Ok(());
-            }
+        match sock.proto {
+            SockProto::TcpListener {
+                max_backlog_size,
+                ref mut backlog,
+            } => {
+                // The behavior of the backlog argument on TCP sockets changed with Linux 2.2.
+                // Now it specifies the queue length for completely established sockets waiting to be accepted,
+                // instead of the number of  instead of the number of  incomplete connection requests.
+                if backlog
+                    .iter()
+                    .filter(|(_, v)| v.state.estabilished())
+                    .count()
+                    >= max_backlog_size
+                {
+                    eprintln!("Socket backlog is full, dropping packet");
+                    return Ok(());
+                }
 
-            match backlog.entry(quad) {
-                Entry::Occupied(mut c) => c.get_mut().incoming_packet(&tcp_packet, interface)?,
-                Entry::Vacant(e) => {
-                    if let Some(c) = tcp_new_connection(ip_packet, tcp_packet, interface, true)? {
-                        e.insert(c);
+                match backlog.entry(new_quad) {
+                    Entry::Occupied(mut c) => {
+                        c.get_mut().incoming_packet(&tcp_packet, interface)?
+                    }
+                    Entry::Vacant(e) => {
+                        if let Some(c) = tcp_new_connection(ip_packet, tcp_packet, interface, true)?
+                        {
+                            e.insert(c);
+                        }
                     }
                 }
-            }
 
-            backlog.retain(|_, v| v.state.should_keep());
-        } else {
-            unreachable!()
+                backlog.retain(|_, v| v.state.should_keep());
+            }
+            SockProto::TcpStream => {
+                if let SockState::Connected { ref mut conn, .. } = sock.state {
+                    conn.incoming_packet(&tcp_packet, interface)?;
+                }
+            }
+            _ => unreachable!(),
         }
     } else {
         eprintln!(
@@ -838,8 +846,8 @@ mod tcp_test {
             .set_checksum(&ip_packet)
             .build();
 
-        let conn =
-            tcp_new_connection(ip_packet, tcp_packet, &mut interface, true).expect("Expected no errors");
+        let conn = tcp_new_connection(ip_packet, tcp_packet, &mut interface, true)
+            .expect("Expected no errors");
         assert_eq!(conn, None);
     }
 
@@ -868,8 +876,8 @@ mod tcp_test {
             .set_checksum(&ip_packet)
             .build();
 
-        let conn =
-            tcp_new_connection(ip_packet, tcp_packet, &mut interface, true).expect("Expected no errors");
+        let conn = tcp_new_connection(ip_packet, tcp_packet, &mut interface, true)
+            .expect("Expected no errors");
         assert_eq!(conn, None);
     }
 }
