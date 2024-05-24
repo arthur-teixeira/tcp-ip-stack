@@ -74,15 +74,8 @@ pub fn udp_incoming(packet: IpV4Packet) -> Result<()> {
     });
 
     if let Some(sock) = sock {
-        eprintln!("Writing message to socket queue");
         sock.recv_queue.push_back(dgram.data.into());
-        Ok(())
-    } else {
-        eprintln!(
-            "No UDP socket listening on port {}, dropping datagram",
-            dgram.dst_port
-        );
-
-        Ok(())
     }
+
+    Ok(())
 }

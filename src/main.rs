@@ -11,6 +11,8 @@ use socket::{_accept, _bind, _listen, _socket};
 use std::io::{Error, Result};
 use tun_tap::{Iface, Mode};
 
+use crate::socket::_recv;
+
 mod arp;
 mod buf_writer;
 mod buffer_view;
@@ -92,7 +94,7 @@ fn main() -> Result<()> {
         arp_cache: ArpCache::default(),
     };
 
-    let loop_handle = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         loop {
             let mut sock_buff = BufferView::from_iface(&mut interface.iface).unwrap();
             let frame = Frame::from_buffer(&mut sock_buff);
@@ -125,8 +127,18 @@ fn main() -> Result<()> {
 
     loop {
         let new_conn = _accept(sockfd, std::ptr::null_mut(), std::ptr::null_mut(), None);
-        eprintln!("Received new TCP connection!");
+        std::thread::spawn(move || {
+            eprintln!("Received new TCP connection!");
+            let mut buf = Vec::new();
+            loop {
+                let rcvd = _recv(new_conn, &mut buf);
+                if rcvd > 0 {
+                    eprintln!("---------------------------------");
+                    eprintln!("Socket {new_conn} received Data!!");
+                    eprintln!("{:?}", String::from_utf8_lossy(&buf));
+                    eprintln!("---------------------------------");
+                }
+            }
+        });
     }
-    // loop_handle.join().expect("Could not join thread");
-    // Ok(())
 }

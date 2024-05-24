@@ -1,6 +1,6 @@
 use std::{
     collections::{btree_map::Entry, BTreeMap, VecDeque},
-    io::{Error, ErrorKind, Result},
+    io::{Error, ErrorKind, Read, Result},
     net::Ipv4Addr,
     time,
 };
@@ -8,7 +8,7 @@ use std::{
 use crate::{
     arp::TunInterface,
     ipv4_send,
-    socket::{sockets, SockProto, SockState},
+    socket::{sockets, SockProto, SockState, Socket},
     utils, Interface, IpProtocol, IpV4Packet,
 };
 
@@ -324,6 +324,7 @@ impl Connection {
         &mut self,
         tcp_packet: &TcpPacket,
         interface: &mut Interface<T>,
+        sock_buf: &mut Vec<u8>,
     ) -> Result<()> {
         let tcph = tcp_packet.header();
         // RFC 793, "Segment Arrives", Otherwise section
@@ -550,6 +551,11 @@ impl Connection {
             }
         }
 
+        if tcph.psh() || tcph.fin() {
+            self.incoming.read_to_end(sock_buf)?;
+            self.incoming.clear();
+        }
+
         // Eight, check FIN bit
         if tcph.fin() {
             // If the FIN bit is set, signal the user "connection closing" and
@@ -692,7 +698,12 @@ pub fn tcp_incoming<T: TunInterface>(
 
                 match backlog.entry(new_quad) {
                     Entry::Occupied(mut c) => {
-                        c.get_mut().incoming_packet(&tcp_packet, interface)?
+                        let mut buf = Vec::new();
+                        c.get_mut()
+                            .incoming_packet(&tcp_packet, interface, &mut buf)?;
+                        if buf.len() > 0 {
+                            sock.recv_queue.push_back(buf.into_boxed_slice());
+                        }
                     }
                     Entry::Vacant(e) => {
                         if let Some(c) = tcp_new_connection(ip_packet, tcp_packet, interface, true)?
@@ -706,7 +717,11 @@ pub fn tcp_incoming<T: TunInterface>(
             }
             SockProto::TcpStream => {
                 if let SockState::Connected { ref mut conn, .. } = sock.state {
-                    conn.incoming_packet(&tcp_packet, interface)?;
+                    let mut buf = Vec::new();
+                    conn.incoming_packet(&tcp_packet, interface, &mut buf)?;
+                    if buf.len() > 0 {
+                        sock.recv_queue.push_back(buf.into_boxed_slice());
+                    }
                 }
             }
             _ => unreachable!(),
