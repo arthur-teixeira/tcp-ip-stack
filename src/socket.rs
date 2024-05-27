@@ -27,7 +27,7 @@ trait SockOps {
         addrlen: *mut socklen_t,
         cur_fd: i32,
     ) -> Result<Option<SocketKind>, i32>;
-    fn read(&mut self, buf: &mut Vec<u8>) -> isize;
+    fn read(&mut self, buf: &mut Vec<u8>) -> Option<isize>;
     fn connect(&mut self, addr: *const sockaddr, addrlen: socklen_t) -> i32;
     // fn write(&mut self, buf: &Vec<u8>) -> i32;
 }
@@ -65,7 +65,7 @@ impl SockOps for SocketKind {
         }
     }
 
-    fn read(&mut self, buf: &mut Vec<u8>) -> isize {
+    fn read(&mut self, buf: &mut Vec<u8>) -> Option<isize> {
         match self {
             Self::Tcp(tcp) => tcp.read(buf),
             Self::Udp(udp) => udp.read(buf),
@@ -103,7 +103,7 @@ impl SockOps for UdpSocket {
         0
     }
 
-    fn read(&mut self, buf: &mut Vec<u8>) -> isize {
+    fn read(&mut self, buf: &mut Vec<u8>) -> Option<isize> {
         todo!()
     }
 
@@ -226,18 +226,11 @@ impl SockOps for TcpSocket {
         }
     }
 
-    fn read(&mut self, buf: &mut Vec<u8>) -> isize {
-        while self.recv_queue.is_empty() {
-            continue;
-        }
-
-        let msg = self
-            .recv_queue
-            .pop_front()
-            .expect("expected recv queue to have item");
-
-        buf.extend_from_slice(&msg);
-        msg.len() as isize
+    fn read(&mut self, buf: &mut Vec<u8>) -> Option<isize> {
+        self.recv_queue.pop_front().and_then(|msg| {
+            buf.extend_from_slice(&msg);
+            Some(msg.len() as isize)
+        })
     }
 
     fn connect(&mut self, addr: *const sockaddr, addrlen: socklen_t) -> i32 {
@@ -580,7 +573,10 @@ pub fn _read(sockfd: i32, buf: &mut Vec<u8>) -> isize {
         let sock = mgr.get_sock(sockfd);
 
         if let Some(sock) = sock {
-            return sock.sock.read(buf);
+            match sock.sock.read(buf) {
+                Some(nb) => return nb,
+                None => continue,
+            }
         } else {
             return unsafe { recv(sockfd, buf.as_slice().as_ptr() as *mut c_void, buf.len(), 0) };
         }
