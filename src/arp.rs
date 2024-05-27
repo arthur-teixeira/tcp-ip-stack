@@ -1,5 +1,6 @@
 use tun_tap::Iface;
 
+use crate::route::Netdev;
 use crate::{BufWriter, BufferView, Interface};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
@@ -22,8 +23,9 @@ impl TunInterface for Iface {
 
 pub type ArpCache = HashMap<String, ArpIpv4>;
 
-pub static IP_ADDR: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 7);
+pub const IP_ADDR: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 7);
 pub const MAC_OCTETS: [u8; 6] = [0, 0x0b, 0x29, 0x6f, 0x50, 0x24];
+pub const BROADCAST_HW: [u8; 6] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
 
 const ARP_ETHERNET: u16 = 0x0001;
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -186,10 +188,7 @@ fn arp_reply<T: TunInterface>(
     interface.iface.snd(&ether_buf)
 }
 
-pub fn arp_recv<T: TunInterface>(
-    frame_data: &[u8],
-    interface: &mut Interface<T>,
-) -> Result<usize> {
+pub fn arp_recv<T: TunInterface>(frame_data: &[u8], interface: &mut Interface<T>) -> Result<usize> {
     let arp_hdr = ArpHeader::from_bytes(frame_data)?;
     let arp_ipv4 = ArpIpv4::from_header(&arp_hdr)?;
 
@@ -218,12 +217,42 @@ pub fn arp_recv<T: TunInterface>(
     }
 }
 
+pub fn arp_request<T: TunInterface>(
+    sip: Ipv4Addr,
+    dip: Ipv4Addr,
+    netdev: Netdev,
+    interface: &mut Interface<T>,
+) -> Result<usize> {
+    let payload = ArpIpv4 {
+        smac: netdev.hwaddr,
+        sip,
+        dmac: BROADCAST_HW,
+        dip,
+    };
+
+    let hdr = ArpHeader {
+        opcode: ArpOp::ArpRequest,
+        hwtype: ArpHwType::Ethernet,
+        protype: ArpProtocolType::Ipv4,
+        hwsize: netdev.addr_len,
+        prosize: 4,
+        data: unsafe { struct_to_bytes(&payload) }.to_vec(),
+    };
+
+    let ether_frame = crate::Frame {
+        dmac: payload.dmac,
+        smac: payload.smac,
+        ethertype: libc::ETH_P_ARP as u16,
+        payload: &hdr.to_buffer(),
+    };
+
+    let ether_buf = ether_frame.to_buffer();
+    interface.iface.snd(&ether_buf)
+}
+
 #[cfg(test)]
 mod arp_test {
-    use crate::{
-        ethernet::Frame,
-        test_utils::MockTun
-    };
+    use crate::{ethernet::Frame, test_utils::MockTun};
 
     use super::*;
     const FRAME: &[u8] = &[
@@ -255,13 +284,13 @@ mod arp_test {
             arp_cache,
         };
 
-        let snt = arp_recv(FRAME, &mut interface)
-            .expect("Expected to receive data correctly");
+        let snt = arp_recv(FRAME, &mut interface).expect("Expected to receive data correctly");
 
         assert_eq!(snt, 42);
 
         let mut response: [u8; 42] = [0; 42];
-        let rcvd = interface.iface
+        let rcvd = interface
+            .iface
             .rcv(&mut response)
             .expect("Expected to read response");
 

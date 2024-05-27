@@ -2,8 +2,9 @@ use bitfield::bitfield;
 use std::io::{Error, ErrorKind, Result};
 use std::net::Ipv4Addr;
 
-use crate::arp::{ArpHwType, TunInterface, MAC_OCTETS};
+use crate::arp::{arp_request, ArpHwType, TunInterface, MAC_OCTETS};
 use crate::ethernet::Frame;
+use crate::route::ROUTES;
 use crate::utils::calculate_checksum;
 use crate::{icmpv4, tcp, udp, Interface};
 
@@ -118,10 +119,15 @@ pub fn ipv4_recv<T: TunInterface>(
 pub fn ipv4_send<T: TunInterface>(
     request: &IpV4Packet,
     data: &[u8],
-    daddr: Ipv4Addr,
+    mut daddr: Ipv4Addr,
     protocol: IpProtocol,
     interface: &mut Interface<T>,
 ) -> Result<()> {
+    let rt = ROUTES.lookup(daddr);
+    if rt.is_default_gateway {
+        daddr = rt.gateway;
+    }
+
     let len: u16 = data.len() as u16 + 20;
     let mut response_packet = IpV4Packet(vec![0; len as usize]);
     let mut hdr = response_packet.mut_header();
@@ -151,6 +157,7 @@ pub fn ipv4_send<T: TunInterface>(
         Some(arp_entry) => arp_entry,
         // TODO: Send ARP request and retry later
         None => {
+            arp_request(crate::arp::IP_ADDR, daddr, rt.netdev, interface)?;
             return Err(Error::new(
                 ErrorKind::AddrNotAvailable,
                 "MAC address was not in cache",
