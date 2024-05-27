@@ -8,7 +8,7 @@ use std::{
 use crate::{
     arp::TunInterface,
     ipv4_send,
-    socket::{sockets, SockProto, SockState},
+    socket::{sockets, SockState, TcpType},
     utils, Interface, IpProtocol, IpV4Packet,
 };
 
@@ -661,6 +661,7 @@ pub fn tcp_incoming<T: TunInterface>(
     let tcp_packet = TcpPacket(ip_packet.data().into());
     let tcp_header = tcp_packet.header();
 
+
     if tcp_packet.calculate_checksum(&ip_packet) != tcp_header.checksum() {
         return Err(Error::new(
             ErrorKind::InvalidData,
@@ -678,8 +679,8 @@ pub fn tcp_incoming<T: TunInterface>(
     let sock = sock_manager.get_sock_by_quad(&new_quad);
 
     if let Some(sock) = sock {
-        match sock.proto {
-            SockProto::TcpListener {
+        match sock.stype {
+            TcpType::TcpListener {
                 max_backlog_size,
                 ref mut backlog,
             } => {
@@ -715,7 +716,7 @@ pub fn tcp_incoming<T: TunInterface>(
 
                 backlog.retain(|_, v| v.state.should_keep());
             }
-            SockProto::TcpStream => {
+            TcpType::TcpStream => {
                 if let SockState::Connected { ref mut conn, .. } = sock.state {
                     let mut buf = Vec::new();
                     conn.incoming_packet(&tcp_packet, interface, &mut buf)?;
@@ -724,7 +725,6 @@ pub fn tcp_incoming<T: TunInterface>(
                     }
                 }
             }
-            _ => unreachable!(),
         }
     } else {
         eprintln!(
@@ -769,7 +769,7 @@ mod tcp_test {
         };
 
         let ip_packet = Ipv4PacketBuilder::new()
-            .set_src_addr(Ipv4Addr::new(192, 168, 0, 1))
+            .set_src_addr(Ipv4Addr::new(192, 168, 100, 1))
             .set_dst_addr(Ipv4Addr::new(10, 0, 0, 7))
             .build();
 

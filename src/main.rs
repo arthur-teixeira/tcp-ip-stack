@@ -11,7 +11,7 @@ use socket::{_accept, _bind, _listen, _socket};
 use std::io::{Error, Result};
 use tun_tap::{Iface, Mode};
 
-use crate::socket::_recv;
+use crate::socket::_read;
 
 mod arp;
 mod buf_writer;
@@ -132,7 +132,7 @@ fn main() -> Result<()> {
             eprintln!("Received new TCP connection!");
             let mut buf = Vec::new();
             loop {
-                let rcvd = _recv(new_conn, &mut buf);
+                let rcvd = _read(new_conn, &mut buf);
                 if rcvd > 0 {
                     eprintln!("---------------------------------");
                     eprintln!("Socket {new_conn} received Data!!");

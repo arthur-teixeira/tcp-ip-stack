@@ -1,7 +1,7 @@
 use std::io::{Error, ErrorKind, Result};
 
 use crate::{
-    socket::{sockets, SockProto},
+    socket::sockets,
     utils, BufWriter, BufferView, IpProtocol, IpV4Packet,
 };
 
@@ -65,13 +65,14 @@ pub fn udp_incoming(packet: IpV4Packet) -> Result<()> {
     }
 
     let mut socks = sockets().lock().unwrap();
-    let sock = socks.socks.iter_mut().find(|s| {
-        if s.proto == SockProto::Udp {
-            s.listen_port().unwrap_or(0) == dgram.dst_port
+    let sock = socks.udp_sockets_mut().find(|s| {
+        if let Some(p) = s.state.port() {
+            dgram.dst_port == p
         } else {
             false
         }
     });
+
 
     if let Some(sock) = sock {
         sock.recv_queue.push_back(dgram.data.into());
