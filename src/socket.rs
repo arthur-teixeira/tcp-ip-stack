@@ -104,7 +104,10 @@ impl SockOps for UdpSocket {
     }
 
     fn read(&mut self, buf: &mut Vec<u8>) -> Option<isize> {
-        todo!()
+        self.recv_queue.pop_front().and_then(|msg| {
+            buf.extend_from_slice(&msg);
+            Some(msg.len() as isize)
+        })
     }
 
     fn listen(&mut self, backlog: i32, highest_port: u16) -> i32 {
