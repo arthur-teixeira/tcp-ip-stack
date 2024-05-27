@@ -64,7 +64,7 @@ pub fn udp_incoming(packet: IpV4Packet) -> Result<()> {
         ));
     }
 
-    let mut socks = sockets().write().unwrap();
+    let mut socks = sockets().lock().unwrap();
     let sock = socks.socks.iter_mut().find(|s| {
         if s.proto == SockProto::Udp {
             s.listen_port().unwrap_or(0) == dgram.dst_port

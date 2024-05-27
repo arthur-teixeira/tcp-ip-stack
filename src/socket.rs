@@ -3,7 +3,7 @@
 use std::{
     collections::{LinkedList, VecDeque},
     mem,
-    sync::{OnceLock, RwLock, RwLockWriteGuard},
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 use libc::{
@@ -120,9 +120,9 @@ impl Default for SocketManager {
     }
 }
 
-pub fn sockets() -> &'static RwLock<SocketManager> {
-    static SOCKS: OnceLock<RwLock<SocketManager>> = OnceLock::new();
-    SOCKS.get_or_init(|| RwLock::new(SocketManager::default()))
+pub fn sockets() -> &'static Mutex<SocketManager> {
+    static SOCKS: OnceLock<Mutex<SocketManager>> = OnceLock::new();
+    SOCKS.get_or_init(|| Mutex::new(SocketManager::default()))
 }
 
 fn is_accepted_type(domain: i32, stype: i32, protocol: i32) -> bool {
@@ -146,13 +146,13 @@ pub fn _socket(
     domain: i32,
     stype: i32,
     protocol: i32,
-    manager: Option<&RwLock<SocketManager>>,
+    manager: Option<&Mutex<SocketManager>>,
 ) -> i32 {
     if !is_accepted_type(domain, stype, protocol) {
         return unsafe { socket(domain, stype, protocol) };
     };
 
-    let mut mgr = manager.unwrap_or(sockets()).write().unwrap();
+    let mut mgr = manager.unwrap_or(sockets()).lock().unwrap();
 
     let fd = mgr.fd;
 
@@ -174,7 +174,7 @@ pub fn _bind(
     sockfd: i32,
     addr: *const sockaddr,
     addrlen: socklen_t,
-    manager: Option<&RwLock<SocketManager>>,
+    manager: Option<&Mutex<SocketManager>>,
 ) -> i32 {
     let mut socket = None;
 
@@ -183,7 +183,7 @@ pub fn _bind(
     }
 
     let address = unsafe { *(addr as *const sockaddr_in) };
-    let mut mgr = manager.unwrap_or(sockets()).write().unwrap();
+    let mut mgr = manager.unwrap_or(sockets()).lock().unwrap();
 
     for sock in mgr.socks.iter_mut() {
         if let SockState::Bound(port) = sock.state {
@@ -206,7 +206,7 @@ pub fn _bind(
     }
 }
 
-fn get_highest_port<'a>(manager: &RwLockWriteGuard<'a, SocketManager>) -> u16 {
+fn get_highest_port<'a>(manager: &MutexGuard<'a, SocketManager>) -> u16 {
     manager.socks.iter().fold(1024, |acc, s| {
         if let SockState::Bound(port) = s.state {
             if port > acc {
@@ -227,9 +227,9 @@ fn get_highest_port<'a>(manager: &RwLockWriteGuard<'a, SocketManager>) -> u16 {
     })
 }
 
-pub fn _listen(sockfd: i32, max_backlog: i32, manager: Option<&RwLock<SocketManager>>) -> i32 {
+pub fn _listen(sockfd: i32, max_backlog: i32, manager: Option<&Mutex<SocketManager>>) -> i32 {
     let manager = manager.unwrap_or(sockets());
-    let mut mgr = manager.write().unwrap();
+    let mut mgr = manager.lock().unwrap();
     let highest_port = get_highest_port(&mgr) + 1;
 
     let sock = mgr.get_sock(sockfd);
@@ -261,10 +261,10 @@ pub fn _accept(
     sockfd: i32,
     addr: *mut sockaddr,
     addrlen: *mut socklen_t,
-    manager: Option<&RwLock<SocketManager>>,
+    manager: Option<&Mutex<SocketManager>>,
 ) -> i32 {
     loop {
-        let mut mgr = manager.unwrap_or(sockets()).write().unwrap();
+        let mut mgr = manager.unwrap_or(sockets()).lock().unwrap();
         let fd = mgr.fd;
         let sock = mgr.get_sock(sockfd);
 
@@ -329,7 +329,7 @@ pub fn _accept(
 pub fn _recv(sockfd: i32, buf: &mut Vec<u8>) -> isize {
     loop {
         let manager = sockets();
-        let mut mgr = manager.write().unwrap();
+        let mut mgr = manager.lock().unwrap();
         let sock = mgr.get_sock(sockfd);
 
         if let Some(sock) = sock {
@@ -348,9 +348,13 @@ pub fn _recv(sockfd: i32, buf: &mut Vec<u8>) -> isize {
     }
 }
 
+pub fn _connect(sockfd: i32, addr: *const sockaddr, addrlen: socklen_t) -> i32 {
+    unimplemented!()
+}
+
 #[cfg(test)]
 mod socket_test {
-    use std::{mem, sync::RwLock};
+    use std::{mem, sync::Mutex};
 
     use libc::{
         in_addr, sa_family_t, sockaddr, sockaddr_in, AF_INET, EADDRINUSE, EINVAL, ENOTSUP,
@@ -359,15 +363,15 @@ mod socket_test {
 
     use super::{SockProto, SockState, SocketManager, _bind, _listen, _socket};
 
-    fn new_mgr() -> RwLock<SocketManager> {
-        RwLock::new(SocketManager::default())
+    fn new_mgr() -> Mutex<SocketManager> {
+        Mutex::new(SocketManager::default())
     }
 
     #[test]
     fn test_tcp_socket() {
         let mgr = new_mgr();
         let result = _socket(AF_INET, SOCK_STREAM, 0, Some(&mgr));
-        let mgr = mgr.read().unwrap();
+        let mgr = mgr.lock().unwrap();
         let sock = mgr.socks.front().expect("Expected socket to be created");
 
         assert_eq!(sock.state, SockState::Unbound);
@@ -385,7 +389,7 @@ mod socket_test {
     fn test_udp_socket() {
         let mgr = new_mgr();
         let result = _socket(AF_INET, SOCK_DGRAM, 0, Some(&mgr));
-        let mgr = mgr.read().unwrap();
+        let mgr = mgr.lock().unwrap();
         let sock = mgr.socks.front().expect("Expected socket to be created");
 
         assert_eq!(sock.state, SockState::Unbound);
@@ -413,7 +417,7 @@ mod socket_test {
             Some(&mgr),
         );
 
-        let mgr = mgr.read().unwrap();
+        let mgr = mgr.lock().unwrap();
 
         let sock = mgr.socks.front().expect("Expected socket");
         assert_eq!(bind_result, 0);

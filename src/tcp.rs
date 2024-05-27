@@ -8,7 +8,7 @@ use std::{
 use crate::{
     arp::TunInterface,
     ipv4_send,
-    socket::{sockets, SockProto, SockState, Socket},
+    socket::{sockets, SockProto, SockState},
     utils, Interface, IpProtocol, IpV4Packet,
 };
 
@@ -674,7 +674,7 @@ pub fn tcp_incoming<T: TunInterface>(
         dst: (ip_packet.header().dst_addr().into(), tcp_header.dst_port()),
     };
 
-    let mut sock_manager = sockets().write().unwrap();
+    let mut sock_manager = sockets().lock().unwrap();
     let sock = sock_manager.get_sock_by_quad(&new_quad);
 
     if let Some(sock) = sock {
