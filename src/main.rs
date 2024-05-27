@@ -24,6 +24,7 @@ mod tcp;
 mod test_utils;
 mod udp;
 mod utils;
+mod route;
 
 struct Interface<T: TunInterface> {
     iface: T,
