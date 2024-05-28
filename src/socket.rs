@@ -29,7 +29,7 @@ trait SockOps {
     ) -> Result<Option<SocketKind>, i32>;
     fn read(&mut self, buf: &mut Vec<u8>) -> Option<isize>;
     fn connect(&mut self, addr: *const sockaddr, addrlen: socklen_t) -> i32;
-    // fn write(&mut self, buf: &Vec<u8>) -> i32;
+    fn write(&mut self, buf: &Vec<u8>) -> i32;
 }
 
 #[derive(Debug, PartialEq)]
@@ -78,6 +78,13 @@ impl SockOps for SocketKind {
             Self::Udp(udp) => udp.bind(addr, addrlen),
         }
     }
+
+    fn write(&mut self, buf: &Vec<u8>) -> i32 {
+        match self {
+            Self::Tcp(tcp) => tcp.write(buf),
+            Self::Udp(udp) => udp.write(buf),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -124,6 +131,10 @@ impl SockOps for UdpSocket {
     }
 
     fn connect(&mut self, addr: *const sockaddr, addrlen: socklen_t) -> i32 {
+        todo!()
+    }
+
+    fn write(&mut self, buf: &Vec<u8>) -> i32 {
         todo!()
     }
 }
@@ -237,6 +248,10 @@ impl SockOps for TcpSocket {
     }
 
     fn connect(&mut self, addr: *const sockaddr, addrlen: socklen_t) -> i32 {
+        todo!()
+    }
+
+    fn write(&mut self, buf: &Vec<u8>) -> i32 {
         todo!()
     }
 }

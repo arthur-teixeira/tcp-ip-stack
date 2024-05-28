@@ -25,6 +25,8 @@ mod test_utils;
 mod udp;
 mod utils;
 mod route;
+mod ipc_socket;
+mod sock_types;
 
 struct Interface<T: TunInterface> {
     iface: T,
@@ -95,6 +97,7 @@ fn main() -> Result<()> {
         arp_cache: ArpCache::default(),
     };
 
+    ipc_socket::start_ipc_listener();
     std::thread::spawn(move || {
         loop {
             let mut sock_buff = BufferView::from_iface(&mut interface.iface).unwrap();
