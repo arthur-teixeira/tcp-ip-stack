@@ -1,4 +1,4 @@
-use libc::__errno_location;
+use libc::{__errno_location, sockaddr, socklen_t, EINVAL};
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -87,7 +87,6 @@ pub extern "C" fn socket_new(domain: i32, ptype: i32, protocol: i32) -> i32 {
     let sockfd = send_to_nic(&mut libfd, &message, &buf);
 
     if sockfd < 0 {
-        drop(message);
         return -1;
     }
 
@@ -95,4 +94,36 @@ pub extern "C" fn socket_new(domain: i32, ptype: i32, protocol: i32) -> i32 {
     socks.insert(sockfd, new_socket);
 
     sockfd
+}
+
+#[no_mangle]
+pub extern "C" fn socket_bind(sockfd: i32, addr: *const sockaddr, addrlen: socklen_t) -> i32 {
+    if addr.is_null() {
+        return -EINVAL;
+    }
+
+    let mut socks = sockets().lock().unwrap();
+
+    let pid = std::process::id();
+    let message = MessageHeader {
+        kind: MessageKind::Bind,
+        pid,
+    };
+
+    let payload = BindMessage {
+        sockfd,
+        addrlen,
+        addr: unsafe { *addr },
+    };
+
+    let lib_socket = match socks.get_mut(&sockfd) {
+        Some(s) => s,
+        None => return -EINVAL, // TODO: call OS bind()
+    };
+
+    let mut buf = Vec::new();
+    message.write_to_buffer(&mut buf);
+    payload.write_to_buffer(&mut buf);
+
+    send_to_nic(&mut lib_socket.libfd, &message, &buf)
 }
