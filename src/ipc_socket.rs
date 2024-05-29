@@ -1,16 +1,14 @@
 use std::{
-    fs::File,
-    io::Read,
-    os::unix::{
-        fs::PermissionsExt,
-        net::{UnixListener, UnixStream},
-    },
+    io::{Read, Write},
+    os::unix::net::{UnixListener, UnixStream},
     process::exit,
 };
 
-use crate::sock_types::*;
+use crate::{sock_types::*, socket::_socket};
 
-use libc::{S_IRGRP, S_IROTH, S_IRUSR, S_IWGRP, S_IWOTH, S_IWUSR, S_IXGRP, S_IXOTH, S_IXUSR};
+use libc::{
+    printf, S_IRGRP, S_IROTH, S_IRUSR, S_IWGRP, S_IWOTH, S_IWUSR, S_IXGRP, S_IXOTH, S_IXUSR,
+};
 
 pub fn start_ipc_listener() -> () {
     std::thread::spawn(move || {
@@ -62,7 +60,7 @@ pub fn start_ipc_listener() -> () {
 
             std::thread::spawn(move || {
                 let mut buf = [0; 8192];
-                loop {
+                'reactor: loop {
                     let nb = match stream.read(&mut buf) {
                         Ok(nb) => nb,
                         Err(e) => {
@@ -71,24 +69,49 @@ pub fn start_ipc_listener() -> () {
                         }
                     };
                     if nb == 0 {
-                        break;
+                        break 'reactor;
                     }
 
-                    process_ipc_call(&mut stream, &buf)
+                    match process_ipc_call(&mut stream, &buf[..nb]) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("Error processing IPC call: {e:?}");
+                            break 'reactor;
+                        }
+                    }
                 }
             });
         }
     });
 }
 
-fn buf_to_struct<T>(buf: &[u8]) -> T {
-    let size = std::mem::size_of::<T>();
-    assert!(buf.len() >= size);
+fn process_ipc_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize, std::io::Error> {
+    let hdr: MessageHeader = MessageHeader::read_from_buffer(&msg);
+    eprintln!("Message received: {:?}", msg);
 
-    unsafe { std::ptr::read(buf.as_ptr() as *const _) }
+    match hdr.kind {
+        MessageKind::Socket => process_socket_call(stream, msg),
+        MessageKind::Bind => todo!(),
+        MessageKind::Listen => todo!(),
+        MessageKind::Accept => todo!(),
+        MessageKind::Read => todo!(),
+        MessageKind::Write => todo!(),
+        MessageKind::Error => todo!(),
+    }
 }
 
-fn process_ipc_call(stream: &mut UnixStream, msg: &[u8]) -> () {
-    let message: SocketMessage = buf_to_struct(msg);
-    eprintln!("GOT IPC MESSAGE: {message:?}");
+fn process_socket_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize, std::io::Error> {
+    let payload = SocketMessage::read_from_buffer(&msg[MessageHeader::SIZE..]);
+
+    let sockfd = _socket(payload.domain, payload.ptype, payload.protocol, None);
+    let errno = if sockfd < 0 { -sockfd } else { 0 };
+
+    let response_header = MessageHeader::read_from_buffer(msg);
+    let response_message = ErrorMessage { errno, rc: sockfd };
+
+    let mut buf = Vec::new();
+    response_header.write_to_buffer(&mut buf);
+    response_message.write_to_buffer(&mut buf);
+
+    stream.write(&buf)
 }
