@@ -6,7 +6,6 @@
 #include <unistd.h>
 
 int main() {
-  printf("Calling from C!\n");
   int sockfd = socket_new(AF_INET, SOCK_DGRAM, 0);
 
   if (sockfd < 0) {
@@ -22,12 +21,6 @@ int main() {
     exit(1);
   }
 
-  // if (socket_listen(sockfd, 10) < 0) {
-  //   perror("listen");
-  //   exit(1);
-  // }
-  //
-
   for (;;) {
     char msg[4096] = {0};
     ssize_t nb = socket_read(sockfd, msg, sizeof(msg));
@@ -35,13 +28,8 @@ int main() {
       perror("Read");
       exit(1);
     }
+    msg[nb] = '\0';
 
-    printf("Got message!\n-----------------");
-
-    for (size_t i = 0; i < nb; i++) {
-      printf("%d ", msg[i]);
-    }
-
-    printf("\n-----------------------------\n");
+    printf("Got message!\n%s\n", msg);
   }
 }

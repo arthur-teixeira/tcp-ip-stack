@@ -39,16 +39,17 @@ fn send_to_nic(libfd: &mut UnixStream, msg_hdr: &MessageHeader, msg: &[u8]) -> i
         Err(e) => eprintln!("Error writing IPC: {e:?}"),
     };
 
-    eprintln!("Message sent: {:?}", msg);
-
     let mut buf = [0; 512];
-    match libfd.read(&mut buf) {
-        Ok(_) => {}
-        Err(e) => eprintln!("Error reading IPC: {e:?}"),
+    let nb = match libfd.read(&mut buf) {
+        Ok(nb) => nb,
+        Err(e) => {
+            eprintln!("Error reading IPC: {e:?}");
+            return -1;
+        }
     };
 
-    let response_header = MessageHeader::read_from_buffer(&buf);
-    let response = ErrorMessage::read_from_buffer(&buf[MessageHeader::SIZE..]);
+    let response_header = MessageHeader::read_from_buffer(&buf[..nb]);
+    let response = ErrorMessage::read_from_buffer(&buf[MessageHeader::SIZE..nb]);
 
     if response.errno > 0 {
         unsafe { *__errno_location() = response.errno };
@@ -178,8 +179,6 @@ pub extern "C" fn socket_accept(sockfd: i32, addr: *mut sockaddr, addrlen: *mut 
         Err(e) => eprintln!("Error writing IPC: {e:?}"),
     };
 
-    eprintln!("Message sent: {:?}", &buf);
-
     let mut buf = [0; 512];
     match lib_socket.libfd.read(&mut buf) {
         Ok(_) => {}
@@ -218,7 +217,7 @@ extern "C" fn socket_read(sockfd: i32, read_buf: *mut c_void, count: size_t) -> 
 
     let pid = std::process::id();
     let hdr = MessageHeader {
-        kind: MessageKind::Accept,
+        kind: MessageKind::Read,
         pid,
     };
 
@@ -238,10 +237,13 @@ extern "C" fn socket_read(sockfd: i32, read_buf: *mut c_void, count: size_t) -> 
         Err(e) => eprintln!("Error writing IPC: {e:?}"),
     };
 
-    let mut buf = Vec::with_capacity(512 + count);
+    let mut buf = [0; 4096];
     match lib_socket.libfd.read(&mut buf) {
         Ok(_) => {}
-        Err(e) => eprintln!("Error reading IPC: {e:?}"),
+        Err(e) => {
+            eprintln!("Error reading IPC: {e:?}");
+            return -1;
+        }
     };
 
     let response_header = MessageHeader::read_from_buffer(&buf);
@@ -256,7 +258,7 @@ extern "C" fn socket_read(sockfd: i32, read_buf: *mut c_void, count: size_t) -> 
         return -1;
     }
 
-    unsafe { std::ptr::copy(&response.buf, read_buf as *mut _, count) }
+    unsafe { std::ptr::copy_nonoverlapping(response.buf.as_ptr(), read_buf as *mut u8, count) }
 
     response.rc
 }

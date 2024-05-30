@@ -18,15 +18,15 @@ mod buf_writer;
 mod buffer_view;
 mod ethernet;
 mod icmpv4;
+mod ipc_socket;
 mod ipv4;
+mod route;
+mod sock_types;
 mod socket;
 mod tcp;
 mod test_utils;
 mod udp;
 mod utils;
-mod route;
-mod ipc_socket;
-mod sock_types;
 
 struct Interface<T: TunInterface> {
     iface: T,
@@ -91,37 +91,7 @@ fn create_tcp_socket() -> Result<i32> {
     Ok(sockfd)
 }
 
-fn main() -> Result<()> {
-    let mut interface = Interface {
-        iface: Iface::without_packet_info("tap1", Mode::Tap)?,
-        arp_cache: ArpCache::default(),
-    };
-
-    ipc_socket::start_ipc_listener();
-    std::thread::spawn(move || {
-        loop {
-            let mut sock_buff = BufferView::from_iface(&mut interface.iface).unwrap();
-            let frame = Frame::from_buffer(&mut sock_buff);
-
-            match frame.ethertype as c_int {
-                libc::ETH_P_ARP => {
-                    if let Err(e) = arp_recv(frame.payload, &mut interface) {
-                        eprintln!("Error: {e}");
-                    }
-                }
-                libc::ETH_P_IP => {
-                    if let Err(e) = ipv4_recv(frame.payload, &mut interface) {
-                        eprintln!("Error: {e}");
-                    }
-                }
-                // libc::ETH_P_IPV6 => eprintln!("Receiving IPv6 packet"),
-                _ => {
-                    continue;
-                }
-            }
-        }
-    });
-
+fn tcp_loop() -> Result<()> {
     let sockfd = create_tcp_socket()?;
 
     let listen_result = _listen(sockfd, 10, None);
@@ -145,4 +115,41 @@ fn main() -> Result<()> {
             }
         });
     }
+}
+
+fn main() -> Result<()> {
+    let mut interface = Interface {
+        iface: Iface::without_packet_info("tap1", Mode::Tap)?,
+        arp_cache: ArpCache::default(),
+    };
+
+    let ipc_handle = ipc_socket::start_ipc_listener();
+    let main_handle = std::thread::spawn(move || {
+        loop {
+            let mut sock_buff = BufferView::from_iface(&mut interface.iface).unwrap();
+            let frame = Frame::from_buffer(&mut sock_buff);
+
+            match frame.ethertype as c_int {
+                libc::ETH_P_ARP => {
+                    if let Err(e) = arp_recv(frame.payload, &mut interface) {
+                        eprintln!("Error: {e}");
+                    }
+                }
+                libc::ETH_P_IP => {
+                    if let Err(e) = ipv4_recv(frame.payload, &mut interface) {
+                        eprintln!("Error: {e}");
+                    }
+                }
+                // libc::ETH_P_IPV6 => eprintln!("Receiving IPv6 packet"),
+                _ => {
+                    continue;
+                }
+            }
+        }
+    });
+
+    ipc_handle.join().expect("Expected to join ipc thread");
+    main_handle.join().expect("Expected to join main thread");
+
+    Ok(())
 }

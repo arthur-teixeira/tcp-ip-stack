@@ -2,6 +2,7 @@ use std::{
     io::{Read, Result, Write},
     os::unix::net::{UnixListener, UnixStream},
     process::exit,
+    thread::JoinHandle,
 };
 
 use crate::{
@@ -11,7 +12,7 @@ use crate::{
 
 use libc::{sockaddr, socklen_t};
 
-pub fn start_ipc_listener() -> () {
+pub fn start_ipc_listener() -> JoinHandle<()> {
     std::thread::spawn(move || {
         let sockname = "/tmp/tcpip.socket";
         let _ = std::fs::remove_file(sockname);
@@ -32,14 +33,14 @@ pub fn start_ipc_listener() -> () {
                 })
                 .unwrap();
 
-            std::thread::spawn(move || {
+            let reactor_handle = std::thread::spawn(move || {
                 let mut buf = [0; 8192];
                 'reactor: loop {
                     let nb = match stream.read(&mut buf) {
                         Ok(nb) => nb,
                         Err(e) => {
                             eprintln!("Error reading from ipc socket: {e:?}");
-                            exit(1);
+                            break 'reactor;
                         }
                     };
                     if nb == 0 {
@@ -47,7 +48,9 @@ pub fn start_ipc_listener() -> () {
                     }
 
                     match process_ipc_call(&mut stream, &buf[..nb]) {
-                        Ok(_) => {}
+                        Ok(nb) => {
+                            eprintln!("Successfully sent message of {nb} bytes");
+                        }
                         Err(e) => {
                             eprintln!("Error processing IPC call: {e:?}");
                             break 'reactor;
@@ -55,13 +58,19 @@ pub fn start_ipc_listener() -> () {
                     }
                 }
             });
+
+            reactor_handle
+                .join()
+                .expect("Expected to join reactor thread");
+
+            // TODO: Close connection and drop socket here
         }
-    });
+    })
 }
 
 fn process_ipc_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
     let hdr: MessageHeader = MessageHeader::read_from_buffer(&msg);
-    eprintln!("Message received: {:?}", msg);
+    eprintln!("Message received: {:?}", hdr.kind);
 
     match hdr.kind {
         MessageKind::Socket => process_socket_call(stream, msg),
@@ -132,7 +141,7 @@ fn process_accept_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
         sockfd: result,
         errno,
         addr,
-        addrlen
+        addrlen,
     };
 
     let mut buf = Vec::new();
@@ -157,9 +166,9 @@ fn process_read_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
         buf: buf.into_boxed_slice(),
     };
 
-    let mut buf = Vec::new();
-    response_header.write_to_buffer(&mut buf);
-    response_message.write_to_buffer(&mut buf);
+    let mut response_buf = Vec::new();
+    response_header.write_to_buffer(&mut response_buf);
+    response_message.write_to_buffer(&mut response_buf);
 
-    stream.write(&buf)
+    stream.write(&response_buf)
 }
