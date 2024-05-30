@@ -91,7 +91,7 @@ impl SockOps for SocketKind {
 pub struct UdpSocket {
     pub state: SockState,
     pub recv_queue: VecDeque<Box<[u8]>>,
-} // TODO
+}
 
 impl SockOps for UdpSocket {
     fn bind(&mut self, addr: *const sockaddr, addrlen: socklen_t) -> i32 {
@@ -112,29 +112,29 @@ impl SockOps for UdpSocket {
 
     fn read(&mut self, buf: &mut Vec<u8>) -> Option<isize> {
         self.recv_queue.pop_front().and_then(|msg| {
-            buf.extend_from_slice(&msg);
+            buf.extend_from_slice(&msg[0..=buf.capacity()]);
             Some(msg.len() as isize)
         })
     }
 
-    fn listen(&mut self, backlog: i32, highest_port: u16) -> i32 {
+    fn listen(&mut self, _backlog: i32, _highest_port: u16) -> i32 {
         -ENOTSUP
     }
 
     fn accept(
         &mut self,
-        addr: *mut sockaddr,
-        addrlen: *mut socklen_t,
-        cur_fd: i32,
+        _addr: *mut sockaddr,
+        _addrlen: *mut socklen_t,
+        _cur_fd: i32,
     ) -> Result<Option<SocketKind>, i32> {
         Err(-EINVAL)
     }
 
-    fn connect(&mut self, addr: *const sockaddr, addrlen: socklen_t) -> i32 {
+    fn connect(&mut self, _addr: *const sockaddr, _addrlen: socklen_t) -> i32 {
         todo!()
     }
 
-    fn write(&mut self, buf: &Vec<u8>) -> i32 {
+    fn write(&mut self, _buf: &Vec<u8>) -> i32 {
         todo!()
     }
 }
@@ -242,7 +242,7 @@ impl SockOps for TcpSocket {
 
     fn read(&mut self, buf: &mut Vec<u8>) -> Option<isize> {
         self.recv_queue.pop_front().and_then(|msg| {
-            buf.extend_from_slice(&msg);
+            buf.extend_from_slice(&msg[0..=buf.capacity()]);
             Some(msg.len() as isize)
         })
     }
@@ -531,21 +531,6 @@ pub fn _listen(sockfd: i32, max_backlog: i32, manager: Option<&Mutex<SocketManag
     let sock = mgr.get_sock(sockfd);
 
     if let Some(sock) = sock {
-        // if let TcpType::Udp = sock.proto {
-        //     return -ENOTSUP;
-        // }
-        // let port = match sock.state {
-        //     SockState::Unbound => highest_port,
-        //     SockState::Listening(_) => return 0,
-        //     SockState::Bound(port) => port,
-        //     SockState::Connected { .. } => return -EOPNOTSUPP,
-        // };
-        //
-        // sock.state = SockState::Listening(port);
-        // sock.proto = TcpType::TcpListener {
-        //     max_backlog_size: max_backlog as usize,
-        //     backlog: Default::default(),
-        // };
         sock.sock.listen(max_backlog, highest_port)
     } else {
         unsafe { listen(sockfd, max_backlog) }

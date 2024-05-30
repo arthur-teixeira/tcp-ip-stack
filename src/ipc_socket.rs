@@ -1,14 +1,15 @@
 use std::{
-    io::{Read, Write},
+    io::{Read, Result, Write},
     os::unix::net::{UnixListener, UnixStream},
     process::exit,
 };
 
-use crate::{sock_types::*, socket::_socket};
-
-use libc::{
-    printf, S_IRGRP, S_IROTH, S_IRUSR, S_IWGRP, S_IWOTH, S_IWUSR, S_IXGRP, S_IXOTH, S_IXUSR,
+use crate::{
+    sock_types::*,
+    socket::{_accept, _bind, _listen, _read, _socket},
 };
+
+use libc::{sockaddr, socklen_t};
 
 pub fn start_ipc_listener() -> () {
     std::thread::spawn(move || {
@@ -21,33 +22,6 @@ pub fn start_ipc_listener() -> () {
                 exit(1);
             })
             .unwrap();
-
-        // let as_file = File::open(sockname)
-        //     .map_err(|e| {
-        //         eprintln!("Error opening socket as file: {e:?}");
-        //         exit(1)
-        //     })
-        //     .unwrap();
-        //
-        // let mut perms = as_file
-        //     .metadata()
-        //     .map_err(|e| {
-        //         eprintln!("Could not get file metadata: {e:?}");
-        //         exit(1);
-        //     })
-        //     .unwrap()
-        //     .permissions();
-        // let mode =
-        //     S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IWGRP | S_IXGRP | S_IROTH | S_IWOTH | S_IXOTH;
-        // perms.set_mode(mode);
-        //
-        // as_file
-        //     .set_permissions(perms)
-        //     .map_err(|e| {
-        //         eprintln!("Could not set permission for socket: {e:?}");
-        //         exit(1);
-        //     })
-        //     .unwrap();
 
         loop {
             let (mut stream, _addr) = sock
@@ -85,29 +59,103 @@ pub fn start_ipc_listener() -> () {
     });
 }
 
-fn process_ipc_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize, std::io::Error> {
+fn process_ipc_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
     let hdr: MessageHeader = MessageHeader::read_from_buffer(&msg);
     eprintln!("Message received: {:?}", msg);
 
     match hdr.kind {
         MessageKind::Socket => process_socket_call(stream, msg),
-        MessageKind::Bind => todo!(),
-        MessageKind::Listen => todo!(),
-        MessageKind::Accept => todo!(),
-        MessageKind::Read => todo!(),
+        MessageKind::Bind => process_bind_call(stream, msg),
+        MessageKind::Listen => process_listen_call(stream, msg),
+        MessageKind::Accept => process_accept_call(stream, msg),
+        MessageKind::Read => process_read_call(stream, msg),
         MessageKind::Write => todo!(),
         MessageKind::Error => todo!(),
     }
 }
 
-fn process_socket_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize, std::io::Error> {
+fn write_response(result: i32, stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
+    let errno = if result < 0 { -result } else { 0 };
+
+    let response_header = MessageHeader::read_from_buffer(msg);
+    let response_message = ErrorMessage { errno, rc: result };
+
+    let mut buf = Vec::new();
+    response_header.write_to_buffer(&mut buf);
+    response_message.write_to_buffer(&mut buf);
+
+    stream.write(&buf)
+}
+
+fn process_socket_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
     let payload = SocketMessage::read_from_buffer(&msg[MessageHeader::SIZE..]);
 
     let sockfd = _socket(payload.domain, payload.ptype, payload.protocol, None);
-    let errno = if sockfd < 0 { -sockfd } else { 0 };
+    write_response(sockfd, stream, msg)
+}
+
+fn process_bind_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
+    let payload = BindMessage::read_from_buffer(&msg[MessageHeader::SIZE..]);
+
+    let result = _bind(
+        payload.sockfd,
+        &payload.addr as *const _,
+        payload.addrlen,
+        None,
+    );
+    write_response(result, stream, msg)
+}
+
+fn process_listen_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
+    let payload = ListenMessage::read_from_buffer(&msg[MessageHeader::SIZE..]);
+
+    let result = _listen(payload.sockfd, payload.backlog, None);
+    write_response(result, stream, msg)
+}
+
+fn process_accept_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
+    let payload = AcceptMessage::read_from_buffer(&msg[MessageHeader::SIZE..]);
+
+    let mut addr: sockaddr = sockaddr {
+        sa_family: 1,
+        sa_data: [0; 14],
+    };
+
+    let mut addrlen: socklen_t = 0;
+
+    let result = _accept(payload.sockfd, &mut addr, &mut addrlen, None);
+
+    let errno = if result < 0 { -result } else { 0 };
 
     let response_header = MessageHeader::read_from_buffer(msg);
-    let response_message = ErrorMessage { errno, rc: sockfd };
+    let response_message = AcceptResponse {
+        sockfd: result,
+        errno,
+        addr,
+        addrlen
+    };
+
+    let mut buf = Vec::new();
+    response_header.write_to_buffer(&mut buf);
+    response_message.write_to_buffer(&mut buf);
+
+    stream.write(&buf)
+}
+
+fn process_read_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
+    let payload = ReadMessage::read_from_buffer(&msg[MessageHeader::SIZE..]);
+
+    let mut buf = Vec::with_capacity(payload.count);
+    let result = _read(payload.sockfd, &mut buf);
+
+    let errno = if result < 0 { -result } else { 0 } as i32;
+
+    let response_header = MessageHeader::read_from_buffer(msg);
+    let response_message = ReadResponse {
+        errno,
+        rc: result,
+        buf: buf.into_boxed_slice(),
+    };
 
     let mut buf = Vec::new();
     response_header.write_to_buffer(&mut buf);
