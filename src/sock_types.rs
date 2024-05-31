@@ -195,7 +195,7 @@ impl ReadFromBuffer for AcceptResponse {
         buf.copy_from_slice(&buffer[4..=7]);
         let errno = i32::from_be_bytes(buf);
 
-        buf.copy_from_slice(&buffer[8..=12]);
+        buf.copy_from_slice(&buffer[8..=11]);
         let addrlen = socklen_t::from_be_bytes(buf);
 
         let addr: sockaddr = unsafe { std::ptr::read(buffer[12..].as_ptr() as *const _) };

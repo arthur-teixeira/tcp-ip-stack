@@ -33,6 +33,8 @@ pub fn start_ipc_listener() -> JoinHandle<()> {
                 })
                 .unwrap();
 
+            eprintln!("Accepted new IPC connection!");
+
             let reactor_handle = std::thread::spawn(move || {
                 let mut buf = [0; 8192];
                 'reactor: loop {
@@ -125,14 +127,20 @@ fn process_listen_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
 fn process_accept_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
     let payload = AcceptMessage::read_from_buffer(&msg[MessageHeader::SIZE..]);
 
-    let mut addr: sockaddr = sockaddr {
+    let mut addr: Box<sockaddr> = sockaddr {
         sa_family: 1,
         sa_data: [0; 14],
-    };
+    }
+    .into();
 
     let mut addrlen: socklen_t = 0;
 
-    let result = _accept(payload.sockfd, &mut addr, &mut addrlen, None);
+    let result = _accept(
+        payload.sockfd,
+        addr.as_mut() as *mut sockaddr, 
+        &mut addrlen as *mut socklen_t,
+        None,
+    );
 
     let errno = if result < 0 { -result } else { 0 };
 
@@ -140,7 +148,7 @@ fn process_accept_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
     let response_message = AcceptResponse {
         sockfd: result,
         errno,
-        addr,
+        addr: *addr,
         addrlen,
     };
 

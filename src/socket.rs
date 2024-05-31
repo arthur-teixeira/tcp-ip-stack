@@ -4,10 +4,7 @@ use std::{
     collections::{
         linked_list::{Iter, IterMut},
         LinkedList, VecDeque,
-    },
-    iter::FilterMap,
-    mem,
-    sync::{Mutex, MutexGuard, OnceLock},
+    }, fs::copy, iter::FilterMap, mem, sync::{Mutex, MutexGuard, OnceLock}
 };
 
 use libc::{
@@ -243,8 +240,9 @@ impl SockOps for TcpSocket {
 
     fn read(&mut self, buf: &mut Vec<u8>) -> Option<isize> {
         self.recv_queue.pop_front().and_then(|msg| {
-            buf.extend_from_slice(&msg[0..=buf.capacity()]);
-            Some(msg.len() as isize)
+            let copy_to = std::cmp::min(buf.capacity(), msg.len());
+            buf.extend_from_slice(&msg[0..copy_to]);
+            Some(copy_to as isize)
         })
     }
 

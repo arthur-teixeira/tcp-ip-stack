@@ -148,6 +148,8 @@ fn main() -> Result<()> {
         }
     });
 
+    // let _ = tcp_loop();
+
     ipc_handle.join().expect("Expected to join ipc thread");
     main_handle.join().expect("Expected to join main thread");
 
