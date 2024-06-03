@@ -12,6 +12,7 @@ path = "src/lib_socket.rs"
 
 [dependencies]
 bitfield = "0.15.0"
+dashmap = "5.5.3"
 ifstructs = "0.1.1"
 libc = "0.2.153"
 tun-tap = "0.1.4"

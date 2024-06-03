@@ -1,18 +1,18 @@
+use dashmap::DashMap;
 use libc::{__errno_location, c_void, size_t, sockaddr, sockaddr_in, socklen_t, ssize_t, EINVAL};
 use std::{
-    collections::HashMap,
     io::{Read, Write},
     os::unix::net::UnixStream,
     process::exit,
-    sync::{Mutex, OnceLock, RwLock},
+    sync::{Mutex, OnceLock},
 };
 mod sock_types;
 
 use sock_types::*;
 
-fn sockets() -> &'static RwLock<HashMap<i32, Mutex<UnixStream>>> {
-    static SOCKS: OnceLock<RwLock<HashMap<i32, Mutex<UnixStream>>>> = OnceLock::new();
-    SOCKS.get_or_init(|| RwLock::new(HashMap::default()))
+fn sockets() -> &'static DashMap<i32, Mutex<UnixStream>> {
+    static SOCKS: OnceLock<DashMap<i32, Mutex<UnixStream>>> = OnceLock::new();
+    SOCKS.get_or_init(|| DashMap::default())
 }
 
 fn init_socket(sockname: &str) -> UnixStream {
@@ -61,7 +61,7 @@ fn send_to_nic(libfd: &mut UnixStream, msg_hdr: &MessageHeader, msg: &[u8]) -> i
 #[no_mangle]
 pub extern "C" fn socket_new(domain: i32, ptype: i32, protocol: i32) -> i32 {
     let mut libfd = init_socket("/tmp/tcpip.socket");
-    let mut socks = sockets().write().unwrap();
+    let socks = sockets();
 
     let pid = std::process::id();
     let message = MessageHeader {
@@ -96,7 +96,7 @@ pub extern "C" fn socket_bind(sockfd: i32, addr: *const sockaddr, addrlen: sockl
         return -EINVAL;
     }
 
-    let socks = sockets().read().unwrap();
+    let socks = sockets();
 
     let pid = std::process::id();
     let message = MessageHeader {
@@ -110,12 +110,12 @@ pub extern "C" fn socket_bind(sockfd: i32, addr: *const sockaddr, addrlen: sockl
         addr: unsafe { *addr },
     };
 
-    let mut lib_socket = match socks.get(&sockfd) {
+    let lib_socket = match socks.get(&sockfd) {
         Some(s) => s,
         None => return -EINVAL, // TODO: call OS bind()
-    }
-    .lock()
-    .unwrap();
+    };
+
+    let mut lib_socket = lib_socket.lock().unwrap();
 
     let mut buf = Vec::new();
     message.write_to_buffer(&mut buf);
@@ -126,7 +126,7 @@ pub extern "C" fn socket_bind(sockfd: i32, addr: *const sockaddr, addrlen: sockl
 
 #[no_mangle]
 pub extern "C" fn socket_listen(sockfd: i32, backlog: i32) -> i32 {
-    let socks = sockets().read().unwrap();
+    let socks = sockets();
 
     let pid = std::process::id();
     let hdr = MessageHeader {
@@ -136,12 +136,12 @@ pub extern "C" fn socket_listen(sockfd: i32, backlog: i32) -> i32 {
 
     let payload = ListenMessage { sockfd, backlog };
 
-    let mut lib_socket = match socks.get(&sockfd) {
+    let lib_socket = match socks.get(&sockfd) {
         Some(s) => s,
         None => return -EINVAL, // TODO: call OS listen()
-    }
-    .lock()
-    .unwrap();
+    };
+
+    let mut lib_socket = lib_socket.lock().unwrap();
 
     let mut buf = Vec::new();
     hdr.write_to_buffer(&mut buf);
@@ -152,7 +152,7 @@ pub extern "C" fn socket_listen(sockfd: i32, backlog: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn socket_accept(sockfd: i32, addr: *mut sockaddr, addrlen: *mut socklen_t) -> i32 {
-    let socks = sockets().read().unwrap();
+    let socks = sockets();
 
     let pid = std::process::id();
     let hdr = MessageHeader {
@@ -162,12 +162,12 @@ pub extern "C" fn socket_accept(sockfd: i32, addr: *mut sockaddr, addrlen: *mut 
 
     let payload = AcceptMessage { sockfd };
 
-    let mut lib_socket = match socks.get(&sockfd) {
+    let lib_socket = match socks.get(&sockfd) {
         Some(s) => s,
         None => return -EINVAL, // TODO: call OS accept()
-    }
-    .lock()
-    .unwrap();
+    };
+
+    let mut lib_socket = lib_socket.lock().unwrap();
 
     eprintln!("Using sockfd {} to accept connections", sockfd);
 
@@ -216,11 +216,6 @@ pub extern "C" fn socket_accept(sockfd: i32, addr: *mut sockaddr, addrlen: *mut 
     let libfd = init_socket("/tmp/tcpip.socket");
     eprintln!("Accepted connection, creating new libsocket");
 
-    drop(lib_socket);
-    drop(socks);
-
-    let mut socks = sockets().write().unwrap();
-    eprintln!("Locked sockets, inserting in list");
     socks.insert(response.sockfd, Mutex::new(libfd));
 
     response.sockfd
@@ -228,7 +223,7 @@ pub extern "C" fn socket_accept(sockfd: i32, addr: *mut sockaddr, addrlen: *mut 
 
 #[no_mangle]
 extern "C" fn socket_read(sockfd: i32, read_buf: *mut c_void, count: size_t) -> ssize_t {
-    let socks = sockets().read().unwrap();
+    let socks = sockets();
 
     eprintln!("Got read call!");
     let pid = std::process::id();
@@ -239,12 +234,12 @@ extern "C" fn socket_read(sockfd: i32, read_buf: *mut c_void, count: size_t) -> 
 
     let payload = ReadMessage { sockfd, count };
 
-    let mut lib_socket = match socks.get(&sockfd) {
+    let lib_socket = match socks.get(&sockfd) {
         Some(s) => s,
         None => return -(EINVAL as isize), // TODO: call OS read()
-    }
-    .lock()
-    .unwrap();
+    };
+
+    let mut lib_socket = lib_socket.lock().unwrap();
 
     eprintln!("successfully acquired socket lock on sockfd: {}", sockfd);
 
