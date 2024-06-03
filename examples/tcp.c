@@ -54,25 +54,10 @@ int main() {
       exit(1);
     }
 
-    printf("Accepted connection in C! %d\n", connfd);
-    char buf[4096];
-    for (;;) {
-      ssize_t nb = socket_read(connfd, buf, sizeof(buf));
-      if (nb < 0) {
-        printf("ERROR: %s\n", strerror(-nb));
-        perror("Read");
-        continue;
-      }
+    int *conn_state = malloc(1);
+    *conn_state = connfd;
 
-      buf[nb] = '\0';
-
-      printf("Got message!\n%s\n", buf);
-    }
-
-    // int *conn_state = malloc(1);
-    // *conn_state = connfd;
-    //
-    // pthread_create(&thread, NULL, handle_connection, conn_state);
+    pthread_create(&thread, NULL, handle_connection, conn_state);
   }
 }
 

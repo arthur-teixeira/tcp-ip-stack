@@ -35,7 +35,7 @@ pub fn start_ipc_listener() -> JoinHandle<()> {
 
             eprintln!("Accepted new IPC connection!");
 
-            let reactor_handle = std::thread::spawn(move || {
+            std::thread::spawn(move || {
                 let mut buf = [0; 8192];
                 'reactor: loop {
                     let nb = match stream.read(&mut buf) {
@@ -60,10 +60,6 @@ pub fn start_ipc_listener() -> JoinHandle<()> {
                     }
                 }
             });
-
-            reactor_handle
-                .join()
-                .expect("Expected to join reactor thread");
 
             // TODO: Close connection and drop socket here
         }

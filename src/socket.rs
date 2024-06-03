@@ -4,7 +4,11 @@ use std::{
     collections::{
         linked_list::{Iter, IterMut},
         LinkedList, VecDeque,
-    }, fs::copy, iter::FilterMap, mem, sync::{Mutex, MutexGuard, OnceLock}
+    },
+    fs::copy,
+    iter::FilterMap,
+    mem,
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 use libc::{
@@ -13,7 +17,7 @@ use libc::{
     IPPROTO_TCP, IPPROTO_UDP, SOCK_DGRAM, SOCK_STREAM,
 };
 
-use crate::tcp::{Connection, Connections, Quad};
+use crate::tcp::{ConnAvailability, Connection, Connections, Quad};
 
 trait SockOps {
     fn bind(&mut self, addr: *const sockaddr, addrlen: socklen_t) -> i32;
@@ -239,6 +243,16 @@ impl SockOps for TcpSocket {
     }
 
     fn read(&mut self, buf: &mut Vec<u8>) -> Option<isize> {
+        match self.state {
+            SockState::Connected { ref conn, .. } => match conn.state.availabity() {
+                ConnAvailability::Closed | ConnAvailability::Write => return Some(-EBADF as isize),
+                _ => (),
+            },
+            SockState::Unbound | SockState::Bound(_) | SockState::Listening(_) => {
+                return Some(-EBADF as isize)
+            }
+        }
+
         self.recv_queue.pop_front().and_then(|msg| {
             let copy_to = std::cmp::min(buf.capacity(), msg.len());
             buf.extend_from_slice(&msg[0..copy_to]);

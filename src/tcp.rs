@@ -194,6 +194,14 @@ pub enum ConnState {
     TimeWait,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConnAvailability {
+    Read,
+    Write,
+    ReadWrite,
+    Closed,
+}
+
 impl ConnState {
     fn should_keep(&self) -> bool {
         match self {
@@ -206,6 +214,17 @@ impl ConnState {
         match self {
             Self::SynRecvd | Self::Closed | Self::Listen => false,
             _ => true,
+        }
+    }
+
+    pub fn availabity(&self) -> ConnAvailability {
+        match self {
+            Self::FinWait1 | Self::FinWait2 => ConnAvailability::Write,
+            Self::Closed | Self::Closing | Self::TimeWait | Self::LastAck => {
+                ConnAvailability::Closed
+            }
+            Self::Listen | Self::SynRecvd | Self::CloseWait => ConnAvailability::Read,
+            Self::Estabilished => ConnAvailability::ReadWrite,
         }
     }
 }
@@ -277,7 +296,7 @@ pub struct Connection {
     ip: IpV4Packet,
     tcp: TcpPacket,
     timers: Timers,
-    state: ConnState,
+    pub state: ConnState,
     send: SendSequenceSpace,
     recv: ReceiveSequenceSpace,
 
@@ -660,7 +679,6 @@ pub fn tcp_incoming<T: TunInterface>(
 ) -> Result<()> {
     let tcp_packet = TcpPacket(ip_packet.data().into());
     let tcp_header = tcp_packet.header();
-
 
     if tcp_packet.calculate_checksum(&ip_packet) != tcp_header.checksum() {
         return Err(Error::new(
