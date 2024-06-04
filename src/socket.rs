@@ -5,19 +5,29 @@ use std::{
         linked_list::{Iter, IterMut},
         LinkedList, VecDeque,
     },
-    fs::copy,
     iter::FilterMap,
     mem,
-    sync::{Mutex, MutexGuard, OnceLock},
+    net::Ipv4Addr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex, MutexGuard, OnceLock,
+    },
+    time,
 };
 
 use libc::{
     accept, bind, c_void, listen, recv, sa_family_t, sockaddr, sockaddr_in, socket, socklen_t,
-    AF_INET, AF_UNSPEC, EADDRINUSE, EAFNOSUPPORT, EBADF, EINVAL, ENOTSUP, EOPNOTSUPP, INADDR_ANY,
-    IPPROTO_TCP, IPPROTO_UDP, SOCK_DGRAM, SOCK_STREAM,
+    AF_INET, AF_UNSPEC, EADDRINUSE, EAFNOSUPPORT, EBADF, EDESTADDRREQ, EINVAL, EISCONN, ENOTSUP,
+    EOPNOTSUPP, INADDR_ANY, IPPROTO_TCP, IPPROTO_UDP, SOCK_DGRAM, SOCK_STREAM,
 };
+use rand::Rng;
 
-use crate::tcp::{ConnAvailability, Connection, Connections, Quad};
+use crate::{
+    arp::IP_ADDR,
+    interface, ipv4_send,
+    tcp::{ConnAvailability, Connection, Connections, Quad},
+    IpProtocol, IpV4Packet,
+};
 
 trait SockOps {
     fn bind(&mut self, addr: *const sockaddr, addrlen: socklen_t) -> i32;
@@ -30,7 +40,7 @@ trait SockOps {
     ) -> Result<Option<SocketKind>, i32>;
     fn read(&mut self, buf: &mut Vec<u8>) -> Option<isize>;
     fn connect(&mut self, addr: *const sockaddr, addrlen: socklen_t) -> i32;
-    fn write(&mut self, buf: &Vec<u8>) -> i32;
+    fn write(&mut self, buf: &[u8]) -> i32;
 }
 
 #[derive(Debug, PartialEq)]
@@ -80,7 +90,7 @@ impl SockOps for SocketKind {
         }
     }
 
-    fn write(&mut self, buf: &Vec<u8>) -> i32 {
+    fn write(&mut self, buf: &[u8]) -> i32 {
         match self {
             Self::Tcp(tcp) => tcp.write(buf),
             Self::Udp(udp) => udp.write(buf),
@@ -132,12 +142,70 @@ impl SockOps for UdpSocket {
         Err(-EINVAL)
     }
 
-    fn connect(&mut self, _addr: *const sockaddr, _addrlen: socklen_t) -> i32 {
-        todo!()
+    fn connect(&mut self, addr: *const sockaddr, addrlen: socklen_t) -> i32 {
+        match self.state {
+            SockState::UdpConnected { .. } => return -EISCONN,
+            SockState::Bound(_) => return -EISCONN,
+            SockState::Connected { .. } => unreachable!(),
+            SockState::Listening(_) => return -EOPNOTSUPP,
+            SockState::Unbound => {}
+        }
+
+        if (addrlen as usize) < std::mem::size_of::<sa_family_t>() {
+            return -EINVAL;
+        }
+
+        if addr.is_null() {
+            return -EINVAL;
+        }
+
+        let sa_addr = unsafe { *addr };
+        if sa_addr.sa_family != AF_INET as u16 {
+            return -EAFNOSUPPORT;
+        }
+        let addr = unsafe { *(addr as *const sockaddr_in) };
+
+        let daddr = Ipv4Addr::from(addr.sin_addr.s_addr);
+        let dport = addr.sin_port;
+
+        let saddr = IP_ADDR;
+        let sport = get_port();
+
+        let quad = Quad {
+            time: time::Instant::now(),
+            src: (saddr, sport as u16),
+            dst: (daddr, dport),
+        };
+
+        self.state = SockState::UdpConnected { quad };
+
+        0
     }
 
-    fn write(&mut self, _buf: &Vec<u8>) -> i32 {
-        todo!()
+    fn write(&mut self, buf: &[u8]) -> i32 {
+        let quad = match self.state {
+            SockState::UdpConnected { quad } => quad,
+            _ => return -EDESTADDRREQ,
+        };
+
+
+        let mut packet = IpV4Packet { 0: vec![0; 20] };
+        packet
+            .mut_header()
+            .set_id(rand::thread_rng().gen_range(0..0xFFFF));
+
+        let mut interface = interface().lock().unwrap();
+        eprintln!("Writing to udp socket");
+
+        // TODO: send to udp layer first
+
+        match ipv4_send(&packet, buf, quad.dst.0, IpProtocol::UDP, &mut interface) {
+            Ok(()) => 0,
+            Err(e) => match e.raw_os_error() {
+                Some(err) => err,
+                None => -1,
+            },
+        }
     }
 }
 
@@ -181,6 +249,7 @@ impl SockOps for TcpSocket {
             SockState::Listening(_) => return 0,
             SockState::Bound(port) => port,
             SockState::Connected { .. } => return -EOPNOTSUPP,
+            SockState::UdpConnected { .. } => unreachable!(),
         };
 
         self.state = SockState::Listening(port);
@@ -251,6 +320,7 @@ impl SockOps for TcpSocket {
             SockState::Unbound | SockState::Bound(_) | SockState::Listening(_) => {
                 return Some(-EBADF as isize)
             }
+            SockState::UdpConnected { .. } => unreachable!(),
         }
 
         self.recv_queue.pop_front().and_then(|msg| {
@@ -264,7 +334,7 @@ impl SockOps for TcpSocket {
         todo!()
     }
 
-    fn write(&mut self, buf: &Vec<u8>) -> i32 {
+    fn write(&mut self, buf: &[u8]) -> i32 {
         todo!()
     }
 }
@@ -284,6 +354,7 @@ pub enum SockState {
     Bound(u16),     // Port
     Listening(u16), // Port
     Connected { quad: Quad, conn: Connection },
+    UdpConnected { quad: Quad },
 }
 
 impl SockState {
@@ -422,6 +493,15 @@ pub fn sockets() -> &'static Mutex<SocketManager> {
     SOCKS.get_or_init(|| Mutex::new(SocketManager::default()))
 }
 
+pub fn port() -> &'static AtomicUsize {
+    static PORT: OnceLock<AtomicUsize> = OnceLock::new();
+    PORT.get_or_init(|| AtomicUsize::new(4000))
+}
+
+pub fn get_port() -> usize {
+    port().fetch_add(1, Ordering::Relaxed)
+}
+
 fn is_accepted_type(domain: i32, stype: i32, protocol: i32) -> bool {
     if domain != AF_INET {
         return false;
@@ -513,7 +593,7 @@ pub fn _bind(
     }
 }
 
-fn get_highest_port<'a>(manager: &MutexGuard<'a, SocketManager>) -> u16 {
+fn get_highest_port(manager: &MutexGuard<'_, SocketManager>) -> u16 {
     manager.socks.iter().fold(1024, |acc, s| match &s.sock {
         SocketKind::Tcp(tcp) => {
             if let Some(port) = tcp.state.port() {
@@ -582,9 +662,9 @@ pub fn _accept(
 
 // ssize_t read(int sockfd, void *buf, size_t len);
 // TODO: change the loop to wait for a condvar before reading from socket buffer again.
-pub fn _read(sockfd: i32, buf: &mut Vec<u8>) -> isize {
+pub fn _read(sockfd: i32, buf: &mut Vec<u8>, manager: Option<&Mutex<SocketManager>>) -> isize {
     loop {
-        let manager = sockets();
+        let manager = manager.unwrap_or(sockets());
         let mut mgr = manager.lock().unwrap();
         let sock = mgr.get_sock(sockfd);
 
@@ -605,7 +685,25 @@ pub fn _connect(
     addrlen: socklen_t,
     manager: Option<&Mutex<SocketManager>>,
 ) -> i32 {
-    unimplemented!()
+    let mut mgr = manager.unwrap_or(sockets()).lock().unwrap();
+    let sock = mgr.get_sock(sockfd);
+
+    if let Some(sock) = sock {
+        sock.sock.connect(addr, addrlen)
+    } else {
+        -EBADF
+    }
+}
+
+pub fn _write(sockfd: i32, buf: &[u8], manager: Option<&Mutex<SocketManager>>) -> i32 {
+    let mut mgr = manager.unwrap_or(sockets()).lock().unwrap();
+    let sock = mgr.get_sock(sockfd);
+
+    if let Some(sock) = sock {
+        sock.sock.write(buf)
+    } else {
+        -EBADF
+    }
 }
 
 #[cfg(test)]

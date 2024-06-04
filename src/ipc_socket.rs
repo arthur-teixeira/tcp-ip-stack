@@ -1,5 +1,5 @@
 use std::{
-    io::{Read, Result, Write},
+    io::{Error, Read, Result, Write},
     os::unix::net::{UnixListener, UnixStream},
     process::exit,
     thread::JoinHandle,
@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     sock_types::*,
-    socket::{_accept, _bind, _listen, _read, _socket},
+    socket::{_accept, _bind, _connect, _listen, _read, _socket, _write},
 };
 
 use libc::{sockaddr, socklen_t};
@@ -54,7 +54,7 @@ pub fn start_ipc_listener() -> JoinHandle<()> {
                             eprintln!("Successfully sent message of {nb} bytes");
                         }
                         Err(e) => {
-                            eprintln!("Error processing IPC call: {e:?}");
+                            eprintln!("Error processing IPC call: {e}");
                             break 'reactor;
                         }
                     }
@@ -73,11 +73,12 @@ fn process_ipc_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
     match hdr.kind {
         MessageKind::Socket => process_socket_call(stream, msg),
         MessageKind::Bind => process_bind_call(stream, msg),
+        MessageKind::Connect => process_connect_call(stream, msg),
         MessageKind::Listen => process_listen_call(stream, msg),
         MessageKind::Accept => process_accept_call(stream, msg),
         MessageKind::Read => process_read_call(stream, msg),
-        MessageKind::Write => todo!(),
-        MessageKind::Error => todo!(),
+        MessageKind::Write => process_write_call(stream, msg),
+        MessageKind::Error => Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid data")),
     }
 }
 
@@ -133,7 +134,7 @@ fn process_accept_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
 
     let result = _accept(
         payload.sockfd,
-        addr.as_mut() as *mut sockaddr, 
+        addr.as_mut() as *mut sockaddr,
         &mut addrlen as *mut socklen_t,
         None,
     );
@@ -159,7 +160,7 @@ fn process_read_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
     let payload = ReadMessage::read_from_buffer(&msg[MessageHeader::SIZE..]);
 
     let mut buf = Vec::with_capacity(payload.count);
-    let result = _read(payload.sockfd, &mut buf);
+    let result = _read(payload.sockfd, &mut buf, None);
 
     let errno = if result < 0 { -result } else { 0 } as i32;
 
@@ -175,4 +176,23 @@ fn process_read_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
     response_message.write_to_buffer(&mut response_buf);
 
     stream.write(&response_buf)
+}
+
+fn process_write_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
+    let payload = WriteMessage::read_from_buffer(&msg[MessageHeader::SIZE..]);
+    let result = _write(payload.sockfd, &payload.buf, None);
+    write_response(result, stream, msg)
+}
+
+fn process_connect_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
+    let payload = BindMessage::read_from_buffer(&msg[MessageHeader::SIZE..]);
+
+    let result = _connect(
+        payload.sockfd,
+        &payload.addr as *const _,
+        payload.addrlen,
+        None,
+    );
+
+    write_response(result, stream, msg)
 }

@@ -19,7 +19,7 @@ fn init_socket(sockname: &str) -> UnixStream {
     let libsock = match UnixStream::connect(sockname) {
         Ok(sock) => sock,
         Err(e) => {
-            eprintln!("Error initializing Socket: {e:?}. Is tcp-ip running?");
+            eprintln!("Error initializing Socket: {}. Is tcp-ip running?", e);
             exit(1);
         }
     };
@@ -41,6 +41,11 @@ fn send_to_nic(libfd: &mut UnixStream, msg_hdr: &MessageHeader, msg: &[u8]) -> i
             return -1;
         }
     };
+
+    if nb == 0 {
+        eprintln!("Error: Empty message");
+        return -1;
+    }
 
     let response_header = MessageHeader::read_from_buffer(&buf[..nb]);
     let response = ErrorMessage::read_from_buffer(&buf[MessageHeader::SIZE..nb]);
@@ -278,4 +283,71 @@ extern "C" fn socket_read(sockfd: i32, read_buf: *mut c_void, count: size_t) -> 
     unsafe { std::ptr::copy_nonoverlapping(response.buf.as_ptr(), read_buf as *mut u8, count) }
 
     response.rc
+}
+
+#[no_mangle]
+extern "C" fn socket_write(sockfd: i32, buf: *const c_void, count: usize) -> isize {
+    let socks = sockets();
+
+    eprintln!("Got write call!");
+    let pid = std::process::id();
+    let hdr = MessageHeader {
+        kind: MessageKind::Write,
+        pid,
+    };
+
+    let buf = unsafe { std::slice::from_raw_parts(buf as *const u8, count) };
+
+    let payload = WriteMessage {
+        sockfd,
+        buf: buf.into(),
+    };
+
+    let lib_socket = match socks.get(&sockfd) {
+        Some(s) => s,
+        None => return -(EINVAL as isize), // TODO: call OS write()
+    };
+
+    let mut lib_socket = lib_socket.lock().unwrap();
+
+    eprintln!("successfully acquired socket lock on sockfd: {}", sockfd);
+
+    let mut buf = Vec::new();
+    hdr.write_to_buffer(&mut buf);
+    payload.write_to_buffer(&mut buf);
+
+    send_to_nic(&mut lib_socket, &hdr, &buf) as isize
+}
+
+#[no_mangle]
+pub extern "C" fn socket_connect(sockfd: i32, addr: *const sockaddr, addrlen: socklen_t) -> i32 {
+    if addr.is_null() {
+        return -EINVAL;
+    }
+
+    let socks = sockets();
+
+    let pid = std::process::id();
+    let message = MessageHeader {
+        kind: MessageKind::Connect,
+        pid,
+    };
+
+    let payload = BindMessage {
+        sockfd,
+        addrlen,
+        addr: unsafe { *addr },
+    };
+
+    let lib_socket = match socks.get(&sockfd) {
+        Some(s) => s,
+        None => return -EINVAL, // TODO: call OS bind()
+    };
+
+    let mut lib_socket = lib_socket.lock().unwrap();
+    let mut buf = Vec::new();
+    message.write_to_buffer(&mut buf);
+    payload.write_to_buffer(&mut buf);
+
+    send_to_nic(&mut lib_socket, &message, &buf)
 }

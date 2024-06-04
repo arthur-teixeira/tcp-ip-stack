@@ -1,4 +1,4 @@
-use libc::{c_int, size_t, sockaddr, socklen_t, wait};
+use libc::{c_int, size_t, sockaddr, socklen_t};
 use std::fmt::Debug;
 
 #[repr(u8)]
@@ -11,6 +11,7 @@ pub enum MessageKind {
     Read,
     Write,
     Error,
+    Connect,
 }
 
 impl MessageKind {
@@ -23,6 +24,7 @@ impl MessageKind {
             4 => Self::Read,
             5 => Self::Write,
             6 => Self::Error,
+            7 => Self::Connect,
             _ => panic!("Invalid message kind: {}", n),
         }
     }
@@ -265,6 +267,33 @@ impl ReadFromBuffer for ReadResponse {
             errno,
             rc,
             buf: buffer[12..].into(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(PartialEq, Eq, Debug)]
+pub struct WriteMessage {
+    pub sockfd: i32,
+    pub buf: Box<[u8]>
+}
+
+impl WriteToBuffer for WriteMessage {
+    fn write_to_buffer(&self, buffer: &mut Vec<u8>) {
+        buffer.extend(self.sockfd.to_be_bytes());
+        buffer.extend_from_slice(&self.buf)
+    }
+}
+
+impl ReadFromBuffer for WriteMessage {
+    fn read_from_buffer(buffer: &[u8]) -> Self {
+        let mut buf = [0; 4];
+        buf.copy_from_slice(&buffer[..=3]);
+        let sockfd = i32::from_be_bytes(buf);
+
+        Self {
+            sockfd,
+            buf: buffer[4..].into(),
         }
     }
 }

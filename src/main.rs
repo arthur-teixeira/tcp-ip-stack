@@ -9,7 +9,8 @@ use libc::{
 };
 use socket::{_accept, _bind, _listen, _socket};
 use std::io::{Error, Result};
-use tun_tap::{Iface, Mode};
+use tun_tap::{Iface,Mode};
+use std::sync::{OnceLock, Mutex};
 
 use crate::socket::_read;
 
@@ -105,7 +106,7 @@ fn tcp_loop() -> Result<()> {
             eprintln!("Received new TCP connection!");
             let mut buf = Vec::new();
             loop {
-                let rcvd = _read(new_conn, &mut buf);
+                let rcvd = _read(new_conn, &mut buf, None);
                 if rcvd > 0 {
                     eprintln!("---------------------------------");
                     eprintln!("Socket {new_conn} received Data!!");
@@ -117,26 +118,33 @@ fn tcp_loop() -> Result<()> {
     }
 }
 
-fn main() -> Result<()> {
-    let mut interface = Interface {
-        iface: Iface::without_packet_info("tap1", Mode::Tap)?,
+fn interface() -> &'static Mutex<Interface<Iface>> {
+    static IFACE: OnceLock<Mutex<Interface<Iface>>> = OnceLock::new();
+    IFACE.get_or_init(|| Mutex::new(Interface {
+        iface: Iface::without_packet_info("tap1", Mode::Tap)
+            .map_err(|e| eprintln!("Error creating interface: {e:?}"))
+            .expect("Expected interface to be created correctly"),
         arp_cache: ArpCache::default(),
-    };
+    }))
+}
+
+fn main() -> Result<()> {
 
     let ipc_handle = ipc_socket::start_ipc_listener();
     let main_handle = std::thread::spawn(move || {
         loop {
-            let mut sock_buff = BufferView::from_iface(&mut interface.iface).unwrap();
+            let mut iface = interface().lock().unwrap();
+            let mut sock_buff = BufferView::from_iface(&mut iface.iface).unwrap();
             let frame = Frame::from_buffer(&mut sock_buff);
 
             match frame.ethertype as c_int {
                 libc::ETH_P_ARP => {
-                    if let Err(e) = arp_recv(frame.payload, &mut interface) {
+                    if let Err(e) = arp_recv(frame.payload, &mut iface) {
                         eprintln!("Error: {e}");
                     }
                 }
                 libc::ETH_P_IP => {
-                    if let Err(e) = ipv4_recv(frame.payload, &mut interface) {
+                    if let Err(e) = ipv4_recv(frame.payload, &mut iface) {
                         eprintln!("Error: {e}");
                     }
                 }
