@@ -1,6 +1,9 @@
-use std::net::Ipv4Addr;
+use std::{io::Result, net::Ipv4Addr};
 
-use crate::arp::{IP_ADDR, MAC_OCTETS};
+use crate::{
+    arp::{arp_request, TunInterface, IP_ADDR, MAC_OCTETS},
+    AppState,
+};
 
 #[derive(Copy, Clone)]
 pub struct Netdev {
@@ -31,6 +34,15 @@ impl RouteTable {
             })
             .or(self.0.last()) // Defaults to default gateway
             .expect("Should only be called on ROUTES static table")
+    }
+
+    pub fn gateway_arp_lookup<T: TunInterface>(&'static self, interface: &mut AppState<T>) -> Result<usize> {
+        let rt = self
+            .0
+            .last()
+            .expect("Should only be called on ROUTES static table");
+
+        arp_request(rt.dst, rt.gateway, rt.netdev, interface)
     }
 }
 

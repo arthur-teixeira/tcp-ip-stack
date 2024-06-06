@@ -78,7 +78,7 @@ impl IpV4Packet {
 
 pub fn ipv4_recv<T: TunInterface>(
     frame_data: &[u8],
-    interface: &mut Interface<T>,
+    interface: Interface<T>,
 ) -> Result<()> {
     let packet = IpV4Packet(frame_data.to_vec());
     let hdr = packet.header();
@@ -121,7 +121,7 @@ pub fn ipv4_send<T: TunInterface>(
     data: &[u8],
     mut daddr: Ipv4Addr,
     protocol: IpProtocol,
-    interface: &mut Interface<T>,
+    interface: Interface<T>,
 ) -> Result<()> {
     let rt = ROUTES.lookup(daddr);
     if rt.is_default_gateway {
@@ -153,11 +153,12 @@ pub fn ipv4_send<T: TunInterface>(
 
     let k = format!("{}-{}", ArpHwType::Ethernet.to_u16(), daddr);
 
+    let mut interface = interface.lock().unwrap();
     let arp_entry = match interface.arp_cache.get(&k) {
         Some(arp_entry) => arp_entry,
         // TODO: Send ARP request and retry later
         None => {
-            arp_request(crate::arp::IP_ADDR, daddr, rt.netdev, interface)?;
+            arp_request(crate::arp::IP_ADDR, daddr, rt.netdev, &mut interface)?;
             return Err(Error::new(
                 ErrorKind::AddrNotAvailable,
                 "MAC address was not in cache",

@@ -1,7 +1,7 @@
 use tun_tap::Iface;
 
 use crate::route::Netdev;
-use crate::{BufWriter, BufferView, Interface};
+use crate::{AppState, BufWriter, BufferView, Interface};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::net::Ipv4Addr;
@@ -165,7 +165,7 @@ unsafe fn struct_to_bytes<T: Sized>(p: &T) -> &[u8] {
 fn arp_reply<T: TunInterface>(
     mut header: ArpHeader,
     packet: &ArpIpv4,
-    interface: &mut Interface<T>,
+    interface: &mut AppState<T>,
 ) -> Result<usize> {
     let response_packet = ArpIpv4 {
         dip: packet.sip,
@@ -185,15 +185,17 @@ fn arp_reply<T: TunInterface>(
     };
 
     let ether_buf = ether_frame.to_buffer();
+    // let mut interface = interface.lock().unwrap();
     interface.iface.snd(&ether_buf)
 }
 
-pub fn arp_recv<T: TunInterface>(frame_data: &[u8], interface: &mut Interface<T>) -> Result<usize> {
+pub fn arp_recv<T: TunInterface>(frame_data: &[u8], iface: Interface<T>) -> Result<usize> {
     let arp_hdr = ArpHeader::from_bytes(frame_data)?;
     let arp_ipv4 = ArpIpv4::from_header(&arp_hdr)?;
 
     let cache_key = format!("{}-{}", arp_hdr.hwtype.to_u16(), arp_ipv4.sip);
 
+    let mut interface = iface.lock().unwrap();
     let merge = match interface.arp_cache.get_mut(&cache_key) {
         Some(entry) => {
             entry.smac = arp_ipv4.smac;
@@ -212,7 +214,7 @@ pub fn arp_recv<T: TunInterface>(frame_data: &[u8], interface: &mut Interface<T>
     }
 
     match arp_hdr.opcode {
-        ArpOp::ArpRequest => arp_reply(arp_hdr, &arp_ipv4, interface),
+        ArpOp::ArpRequest => arp_reply(arp_hdr, &arp_ipv4, &mut interface),
         _ => Ok(0),
     }
 }
@@ -221,7 +223,7 @@ pub fn arp_request<T: TunInterface>(
     sip: Ipv4Addr,
     dip: Ipv4Addr,
     netdev: Netdev,
-    interface: &mut Interface<T>,
+    interface: &mut AppState<T>,
 ) -> Result<usize> {
     let payload = ArpIpv4 {
         smac: netdev.hwaddr,
@@ -279,7 +281,7 @@ mod arp_test {
         let temp_file = MockTun::new("/tmp/mock_tun");
         let arp_cache = ArpCache::new();
 
-        let mut interface = Interface {
+        let mut interface = AppState {
             iface: temp_file,
             arp_cache,
         };

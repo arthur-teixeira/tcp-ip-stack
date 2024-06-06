@@ -23,10 +23,11 @@ use libc::{
 use rand::Rng;
 
 use crate::{
-    arp::IP_ADDR,
-    interface, ipv4_send,
+    arp::{TunInterface, IP_ADDR},
+    ipv4_send,
     tcp::{ConnAvailability, Connection, Connections, Quad},
-    IpProtocol, IpV4Packet,
+    udp::udp_outgoing,
+    Interface, IpProtocol, IpV4Packet,
 };
 
 trait SockOps {
@@ -40,7 +41,7 @@ trait SockOps {
     ) -> Result<Option<SocketKind>, i32>;
     fn read(&mut self, buf: &mut Vec<u8>) -> Option<isize>;
     fn connect(&mut self, addr: *const sockaddr, addrlen: socklen_t) -> i32;
-    fn write(&mut self, buf: &[u8]) -> i32;
+    fn write<T: TunInterface>(&mut self, buf: &[u8], interface: Interface<T>) -> i32;
 }
 
 #[derive(Debug, PartialEq)]
@@ -90,10 +91,10 @@ impl SockOps for SocketKind {
         }
     }
 
-    fn write(&mut self, buf: &[u8]) -> i32 {
+    fn write<T: TunInterface>(&mut self, buf: &[u8], interface: Interface<T>) -> i32 {
         match self {
-            Self::Tcp(tcp) => tcp.write(buf),
-            Self::Udp(udp) => udp.write(buf),
+            Self::Tcp(tcp) => tcp.write(buf, interface),
+            Self::Udp(udp) => udp.write(buf, interface),
         }
     }
 }
@@ -182,29 +183,21 @@ impl SockOps for UdpSocket {
         0
     }
 
-    fn write(&mut self, buf: &[u8]) -> i32 {
+    fn write<T: TunInterface>(&mut self, buf: &[u8], interface: Interface<T>) -> i32 {
         let quad = match self.state {
             SockState::UdpConnected { quad } => quad,
             _ => return -EDESTADDRREQ,
         };
 
-
-        let mut packet = IpV4Packet { 0: vec![0; 20] };
-        packet
-            .mut_header()
-            .set_id(rand::thread_rng().gen_range(0..0xFFFF));
-
-        let mut interface = interface().lock().unwrap();
-        eprintln!("Writing to udp socket");
-
-        // TODO: send to udp layer first
-
-        match ipv4_send(&packet, buf, quad.dst.0, IpProtocol::UDP, &mut interface) {
-            Ok(()) => 0,
-            Err(e) => match e.raw_os_error() {
-                Some(err) => err,
-                None => -1,
-            },
+        match udp_outgoing(&quad, buf, interface) {
+            Ok(nb) => nb as i32,
+            Err(e) => {
+                eprintln!("Error sending UDP packet: {}", e);
+                match e.raw_os_error() {
+                    Some(err) => err,
+                    None => -1,
+                }
+            }
         }
     }
 }
@@ -334,7 +327,7 @@ impl SockOps for TcpSocket {
         todo!()
     }
 
-    fn write(&mut self, buf: &[u8]) -> i32 {
+    fn write<T: TunInterface>(&mut self, buf: &[u8], interface: Interface<T>) -> i32 {
         todo!()
     }
 }
@@ -695,12 +688,17 @@ pub fn _connect(
     }
 }
 
-pub fn _write(sockfd: i32, buf: &[u8], manager: Option<&Mutex<SocketManager>>) -> i32 {
+pub fn _write<T: TunInterface>(
+    sockfd: i32,
+    buf: &[u8],
+    manager: Option<&Mutex<SocketManager>>,
+    interface: Interface<T>,
+) -> i32 {
     let mut mgr = manager.unwrap_or(sockets()).lock().unwrap();
     let sock = mgr.get_sock(sockfd);
 
     if let Some(sock) = sock {
-        sock.sock.write(buf)
+        sock.sock.write(buf, interface)
     } else {
         -EBADF
     }

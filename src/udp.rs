@@ -1,9 +1,10 @@
-use std::io::{Error, ErrorKind, Result};
-
-use crate::{
-    socket::sockets,
-    utils, BufWriter, BufferView, IpProtocol, IpV4Packet,
+use std::{
+    io::{Error, ErrorKind, Result},
+    net::Ipv4Addr,
 };
+use rand::Rng;
+
+use crate::{arp::TunInterface, ipv4_send, socket::sockets, tcp::Quad, utils, BufWriter, BufferView, Interface, IpProtocol, IpV4Packet};
 
 #[derive(Debug)]
 pub struct UserDatagram<'a> {
@@ -51,6 +52,16 @@ impl<'a> UserDatagram<'a> {
 
         result == self.checksum
     }
+
+    pub fn set_checksum(&mut self, src_ip: &Ipv4Addr, dst_ip: &Ipv4Addr) {
+        self.checksum = utils::ipv4_checksum(
+            &self.to_buffer(),
+            3,
+            &src_ip,
+            &dst_ip,
+            IpProtocol::UDP as u8,
+        );
+    }
 }
 
 pub fn udp_incoming(packet: IpV4Packet) -> Result<()> {
@@ -73,10 +84,31 @@ pub fn udp_incoming(packet: IpV4Packet) -> Result<()> {
         }
     });
 
-
     if let Some(sock) = sock {
         sock.recv_queue.push_back(dgram.data.into());
     }
 
     Ok(())
+}
+
+pub fn udp_outgoing<T:TunInterface>(quad: &Quad, data: &[u8], interface: Interface<T>) -> Result<usize> {
+    let mut packet = IpV4Packet { 0: vec![0; 20] };
+    packet
+        .mut_header()
+        .set_id(rand::thread_rng().gen_range(0..0xFFFF));
+
+    let mut dgram = UserDatagram {
+        src_port: quad.src.1,
+        dst_port: quad.dst.1,
+        len: 8 + data.len() as u16,
+        checksum: 0,
+        data,
+    };
+
+    dgram.set_checksum(&quad.src.0, &quad.dst.0);
+
+    match ipv4_send(&packet, &dgram.to_buffer(), quad.dst.0, IpProtocol::UDP, interface) {
+        Ok(()) => Ok(data.len()),
+        Err(e) => Err(e)
+    }
 }

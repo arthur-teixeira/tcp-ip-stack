@@ -73,7 +73,7 @@ impl TcpPacket {
 fn tcp_new_connection<'a, T: TunInterface>(
     ip_packet: IpV4Packet,
     tcp_packet: TcpPacket,
-    interface: &mut Interface<T>,
+    interface: Interface<T>,
     accept: bool,
 ) -> Result<Option<Connection>> {
     let tcph = tcp_packet.header();
@@ -342,7 +342,7 @@ impl Connection {
     fn incoming_packet<T: TunInterface>(
         &mut self,
         tcp_packet: &TcpPacket,
-        interface: &mut Interface<T>,
+        interface: Interface<T>,
         sock_buf: &mut Vec<u8>,
     ) -> Result<()> {
         let tcph = tcp_packet.header();
@@ -555,7 +555,7 @@ impl Connection {
                 // sender that a segment was received out-of-order and which sequence
                 // number is expected.
                 if tcph.sequence_number() > self.recv.nxt {
-                    self.send(self.send.nxt, interface)?;
+                    self.send(self.send.nxt, interface.clone())?;
                 } else {
                     // Once the TCP takes responsibility for the data it advances
                     // RCV.NXT over the data accepted, and adjusts RCV.WND as
@@ -565,7 +565,7 @@ impl Connection {
 
                     // TODO: Delay ACK, try to send only one
                     // Acknowledgement: <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
-                    self.send(self.send.nxt, interface)?;
+                    self.send(self.send.nxt, interface.clone())?;
                 }
             }
         }
@@ -621,14 +621,14 @@ impl Connection {
         }
     }
 
-    fn send_rst<T: TunInterface>(&mut self, seq: u32, interface: &mut Interface<T>) -> Result<()> {
+    fn send_rst<T: TunInterface>(&mut self, seq: u32, interface: Interface<T>) -> Result<()> {
         self.tcp.mut_header().set_rst(true);
         self.tcp.mut_header().set_ack_number(0);
         self.send(seq, interface)
     }
 
     // TODO: Process timers, update sequence spaces
-    fn send<T: TunInterface>(&mut self, seq: u32, interface: &mut Interface<T>) -> Result<()> {
+    fn send<T: TunInterface>(&mut self, seq: u32, interface: Interface<T>) -> Result<()> {
         let daddr = Ipv4Addr::from(self.ip.header().src_addr());
 
         let response_buf = Vec::from(self.tcp.raw());
@@ -675,7 +675,7 @@ impl Connection {
 
 pub fn tcp_incoming<T: TunInterface>(
     ip_packet: IpV4Packet,
-    interface: &mut Interface<T>,
+    interface: Interface<T>,
 ) -> Result<()> {
     let tcp_packet = TcpPacket(ip_packet.data().into());
     let tcp_header = tcp_packet.header();
@@ -770,7 +770,7 @@ fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {
 mod tcp_test {
     use super::tcp_new_connection;
     use crate::{
-        arp::{ArpCache, ArpIpv4, TunInterface},
+        arp::{ArpCache, ArpIpv4},
         tcp::{ConnState, ReceiveSequenceSpace, SendSequenceSpace, TcpPacket},
         test_utils::{Ipv4PacketBuilder, MockTun, TcpPacketBuilder},
         Interface,

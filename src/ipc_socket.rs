@@ -6,13 +6,17 @@ use std::{
 };
 
 use crate::{
+    arp::TunInterface,
     sock_types::*,
     socket::{_accept, _bind, _connect, _listen, _read, _socket, _write},
+    Interface,
 };
 
 use libc::{sockaddr, socklen_t};
 
-pub fn start_ipc_listener() -> JoinHandle<()> {
+pub fn start_ipc_listener<T: TunInterface + Sync + Send + 'static>(
+    interface: Interface<T>,
+) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let sockname = "/tmp/tcpip.socket";
         let _ = std::fs::remove_file(sockname);
@@ -35,6 +39,7 @@ pub fn start_ipc_listener() -> JoinHandle<()> {
 
             eprintln!("Accepted new IPC connection!");
 
+            let interface = interface.clone();
             std::thread::spawn(move || {
                 let mut buf = [0; 8192];
                 'reactor: loop {
@@ -45,11 +50,12 @@ pub fn start_ipc_listener() -> JoinHandle<()> {
                             break 'reactor;
                         }
                     };
+
                     if nb == 0 {
                         break 'reactor;
                     }
 
-                    match process_ipc_call(&mut stream, &buf[..nb]) {
+                    match process_ipc_call(&mut stream, &buf[..nb], interface.clone()) {
                         Ok(nb) => {
                             eprintln!("Successfully sent message of {nb} bytes");
                         }
@@ -66,7 +72,11 @@ pub fn start_ipc_listener() -> JoinHandle<()> {
     })
 }
 
-fn process_ipc_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
+fn process_ipc_call<T: TunInterface>(
+    stream: &mut UnixStream,
+    msg: &[u8],
+    interface: Interface<T>,
+) -> Result<usize> {
     let hdr: MessageHeader = MessageHeader::read_from_buffer(&msg);
     eprintln!("Message received: {:?}", hdr.kind);
 
@@ -77,7 +87,7 @@ fn process_ipc_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
         MessageKind::Listen => process_listen_call(stream, msg),
         MessageKind::Accept => process_accept_call(stream, msg),
         MessageKind::Read => process_read_call(stream, msg),
-        MessageKind::Write => process_write_call(stream, msg),
+        MessageKind::Write => process_write_call(stream, msg, interface),
         MessageKind::Error => Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid data")),
     }
 }
@@ -178,9 +188,13 @@ fn process_read_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
     stream.write(&response_buf)
 }
 
-fn process_write_call(stream: &mut UnixStream, msg: &[u8]) -> Result<usize> {
+fn process_write_call<T: TunInterface>(
+    stream: &mut UnixStream,
+    msg: &[u8],
+    interface: Interface<T>,
+) -> Result<usize> {
     let payload = WriteMessage::read_from_buffer(&msg[MessageHeader::SIZE..]);
-    let result = _write(payload.sockfd, &payload.buf, None);
+    let result = _write(payload.sockfd, &payload.buf, None, interface);
     write_response(result, stream, msg)
 }
 

@@ -121,7 +121,7 @@ impl<'a> IcmpV4Message<'a> {
 fn icmpv4_reply<T: TunInterface>(
     ip_packet: IpV4Packet,
     mut icmp_hdr: IcmpV4Header,
-    interface: &mut Interface<T>,
+    interface: Interface<T>,
 ) -> Result<()> {
     icmp_hdr.message_type = IcmpV4MessageType::EchoReply;
     icmp_hdr.csum = 0;
@@ -138,7 +138,7 @@ fn icmpv4_reply<T: TunInterface>(
     )
 }
 
-pub fn icmpv4_incoming<T: TunInterface>(ip_packet: IpV4Packet, interface: &mut Interface<T>) -> Result<()> {
+pub fn icmpv4_incoming<T: TunInterface>(ip_packet: IpV4Packet, interface: Interface<T>) -> Result<()> {
     let ip_data = ip_packet.data();
     let mut buf_view = BufferView::from_slice(ip_data)?;
     let icmp_hdr = IcmpV4Header::from_buffer(&mut buf_view)?;

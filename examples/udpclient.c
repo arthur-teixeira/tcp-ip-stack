@@ -31,6 +31,8 @@ int main() {
       continue;
     }
 
+    printf("Port: %d\n", ((struct sockaddr_in *)p->ai_addr)->sin_port);
+
     if (socket_connect(sockfd, p->ai_addr, p->ai_addrlen) < 0) {
       perror("connect");
       // TODO: socket_close(sockfd);
